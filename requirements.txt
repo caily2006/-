@@ -1,0 +1,4 @@
+streamlit
+matplotlib
+pandas  # 如果你用到了数据处理，请加上
+numpy   # 如果你用到了数值计算，请加上
