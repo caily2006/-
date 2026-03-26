@@ -288,3 +288,16 @@ if __name__ == "__main__":
     import streamlit as st
 st.title("我的可视化应用")
 st.write("Hello, Streamlit!")
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+
+st.title("我的可视化应用")
+st.write("你好，Streamlit!")
+
+# 示例：简单折线图
+df = pd.DataFrame({
+    'x': [1, 2, 3, 4, 5],
+    'y': [10, 20, 15, 25, 30]
+})
+st.line_chart(df, x='x', y='y')
