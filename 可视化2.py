@@ -4,6 +4,7 @@ import random
 from collections import deque
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+import matplotlib.dates as mdates
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -73,20 +74,20 @@ class DroneHeartbeatSimulator:
         """获取最近的数据用于可视化"""
         sequences = []
         delays = []
-        timestamps = []
+        receive_times = []
         
         for record in self.heartbeat_history:
             sequences.append(record['sequence'])
             delays.append(record['delay_ms'])
-            timestamps.append(record['receive_time'])
+            receive_times.append(record['receive_time'])
         
         # 只返回最近的数据
         if len(sequences) > window_size:
             sequences = sequences[-window_size:]
             delays = delays[-window_size:]
-            timestamps = timestamps[-window_size:]
+            receive_times = receive_times[-window_size:]
         
-        return sequences, delays, timestamps
+        return sequences, delays, receive_times
     
     def get_statistics(self):
         """获取统计信息"""
@@ -111,29 +112,29 @@ class DroneHeartbeatSimulator:
         }
 
 # --------------------------
-# 2. 图表绘制函数
+# 2. 图表绘制函数（横坐标改为时间）
 # --------------------------
-def create_heartbeat_charts(sequences, delays, timeout_count, timeout_events):
-    """创建心跳监控图表"""
+def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, timeout_events):
+    """创建心跳监控图表，横坐标为时间"""
     plt.style.use('seaborn-v0_8-darkgrid')
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
     
-    if sequences and delays:
-        # ========== 子图1：延迟监控 ==========
-        ax1.plot(sequences, delays, 'b-o', markersize=6, linewidth=2, 
+    if sequences and delays and receive_times:
+        # ========== 子图1：延迟监控（横坐标为时间） ==========
+        ax1.plot(receive_times, delays, 'b-o', markersize=6, linewidth=2, 
                 markeredgecolor='darkblue', markeredgewidth=1)
-        ax1.set_xlabel('心跳序号', fontsize=12, fontweight='bold')
+        ax1.set_xlabel('接收时间', fontsize=12, fontweight='bold')
         ax1.set_ylabel('延迟 (ms)', fontsize=12, fontweight='bold')
-        ax1.set_title('实时心跳延迟监控', fontsize=14, fontweight='bold')
+        ax1.set_title('实时心跳延迟监控（按时间）', fontsize=14, fontweight='bold')
         ax1.grid(True, alpha=0.3, linestyle='--')
         
-        # 设置x轴为整数刻度
-        ax1.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-        ax1.xaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
+        # 设置x轴为时间格式
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+        ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
+        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
         
-        # 设置x轴范围
-        if sequences:
-            ax1.set_xlim(min(sequences) - 0.5, max(sequences) + 0.5)
+        # 自动调整x轴范围
+        ax1.autoscale_view()
         
         # 添加平均延迟线
         if delays:
@@ -149,35 +150,29 @@ def create_heartbeat_charts(sequences, delays, timeout_count, timeout_events):
         # 填充超出阈值的区域
         threshold = 400
         above_threshold = [d if d > threshold else threshold for d in delays]
-        ax1.fill_between(sequences, threshold, above_threshold, 
+        ax1.fill_between(receive_times, threshold, above_threshold, 
                         alpha=0.3, color='red', label='超出阈值')
         
-        # ========== 子图2：序号接收情况 ==========
-        indices = list(range(len(sequences)))
-        ax2.plot(indices, sequences, 'g-o', markersize=6, linewidth=2,
+        # ========== 子图2：序号接收情况（横坐标为时间） ==========
+        ax2.plot(receive_times, sequences, 'g-o', markersize=6, linewidth=2,
                 markeredgecolor='darkgreen', markeredgewidth=1)
-        ax2.set_xlabel('接收顺序（按时间排序）', fontsize=12, fontweight='bold')
+        ax2.set_xlabel('接收时间', fontsize=12, fontweight='bold')
         ax2.set_ylabel('心跳序号', fontsize=12, fontweight='bold')
-        ax2.set_title(f'心跳序号接收情况 | 超时次数: {timeout_count}', 
+        ax2.set_title(f'心跳序号接收情况（按时间） | 超时次数: {timeout_count}', 
                      fontsize=14, fontweight='bold')
         ax2.grid(True, alpha=0.3, linestyle='--')
         
-        # 设置x轴和y轴为整数刻度
-        ax2.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-        ax2.xaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
+        # 设置x轴为时间格式
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+        ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
+        plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
+        
+        # 设置y轴为整数刻度
         ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
         ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
         
-        # 设置y轴范围
-        if sequences:
-            ax2.set_ylim(min(sequences) - 0.5, max(sequences) + 0.5)
-        
-        # 添加理想接收线
-        if indices and sequences:
-            ideal_line = [min(sequences) + i for i in range(len(indices))]
-            ax2.plot(indices, ideal_line, 'r--', linewidth=1.5, alpha=0.6, 
-                    label='理想接收线（连续）')
-            ax2.legend(loc='upper left', fontsize=9)
+        # 自动调整x轴范围
+        ax2.autoscale_view()
         
         # 显示超时警告
         if timeout_events:
@@ -201,7 +196,20 @@ def create_heartbeat_charts(sequences, delays, timeout_count, timeout_events):
     return fig
 
 # --------------------------
-# 3. Streamlit 页面配置
+# 3. 时间显示函数
+# --------------------------
+def get_current_time_info():
+    """获取当前时间信息"""
+    now = datetime.datetime.now()
+    return {
+        'datetime': now,
+        'time_str': now.strftime('%Y年%m月%d日 %H:%M:%S'),
+        'weekday': now.strftime('%A'),
+        'timestamp': now.timestamp()
+    }
+
+# --------------------------
+# 4. Streamlit 页面配置
 # --------------------------
 st.set_page_config(page_title="无人机心跳监控系统", layout="wide", page_icon="🚁")
 
@@ -228,11 +236,21 @@ st.markdown("""
         50% { opacity: 0.5; }
         100% { opacity: 1; }
     }
+    .time-display {
+        background-color: #1f77b4;
+        color: white;
+        padding: 10px;
+        border-radius: 5px;
+        text-align: center;
+        font-size: 20px;
+        font-weight: bold;
+        margin-bottom: 20px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # --------------------------
-# 4. 初始化 Session State
+# 5. 初始化 Session State
 # --------------------------
 if "simulator" not in st.session_state:
     st.session_state.simulator = DroneHeartbeatSimulator(timeout_seconds=3)
@@ -244,13 +262,25 @@ if "update_counter" not in st.session_state:
     st.session_state.update_counter = 0
 
 # --------------------------
-# 5. 标题和说明
+# 6. 标题和实时时间显示
 # --------------------------
 st.title("🚁 无人机心跳实时可视化监控系统")
+
+# 实时时间显示
+current_time_info = get_current_time_info()
+time_col1, time_col2, time_col3 = st.columns([1, 2, 1])
+with time_col2:
+    st.markdown(f"""
+    <div class="time-display">
+        📅 {current_time_info['time_str']}<br>
+        📍 {current_time_info['weekday']}
+    </div>
+    """, unsafe_allow_html=True)
+
 st.markdown("实时监控无人机心跳数据，包含延迟分析和超时检测")
 
 # --------------------------
-# 6. 控制面板
+# 7. 控制面板
 # --------------------------
 col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -280,7 +310,7 @@ with col5:
 st.markdown("---")
 
 # --------------------------
-# 7. 实时数据生成（关键部分）
+# 8. 实时数据生成
 # --------------------------
 if st.session_state.running:
     current_time = time.time()
@@ -298,12 +328,12 @@ if st.session_state.running:
         
         # 显示实时通知
         if record:
-            st.toast(f"✅ 心跳 #{record['sequence']} | 延迟: {record['delay_ms']:.1f}ms", icon="✅")
+            st.toast(f"✅ 心跳 #{record['sequence']} | 延迟: {record['delay_ms']:.1f}ms | 时间: {record['receive_time'].strftime('%H:%M:%S')}", icon="✅")
         else:
-            st.toast("⚠️ 心跳丢失", icon="⚠️")
+            st.toast(f"⚠️ 心跳丢失 | 时间: {datetime.datetime.now().strftime('%H:%M:%S')}", icon="⚠️")
 
 # --------------------------
-# 8. 统计指标显示
+# 9. 统计指标显示
 # --------------------------
 simulator = st.session_state.simulator
 stats = simulator.get_statistics()
@@ -339,19 +369,20 @@ with col5:
 st.markdown("---")
 
 # --------------------------
-# 9. 实时图表显示（持续更新）
+# 10. 实时图表显示（横坐标为时间）
 # --------------------------
 # 创建图表容器
 chart_container = st.container()
 
 with chart_container:
     # 获取最新数据
-    sequences, delays, timestamps = simulator.get_recent_data(window_size=30)
+    sequences, delays, receive_times = simulator.get_recent_data(window_size=30)
     
     # 创建并显示图表
     fig = create_heartbeat_charts(
         sequences, 
         delays, 
+        receive_times,
         len(simulator.timeout_events),
         simulator.timeout_events
     )
@@ -359,7 +390,7 @@ with chart_container:
     plt.close(fig)
 
 # --------------------------
-# 10. 实时状态面板
+# 11. 实时状态面板
 # --------------------------
 col1, col2 = st.columns(2)
 
@@ -367,20 +398,24 @@ with col1:
     st.subheader("📡 最新心跳信息")
     if simulator.heartbeat_history:
         latest = simulator.heartbeat_history[-1]
+        current_time = datetime.datetime.now()
+        
         st.markdown(f"""
         - **序号**: `{latest['sequence']}`
         - **延迟**: `{latest['delay_ms']:.1f} ms`
         - **接收时间**: `{latest['receive_time'].strftime('%Y-%m-%d %H:%M:%S')}`
         - **发送时间**: `{latest['send_time'].strftime('%Y-%m-%d %H:%M:%S')}`
+        - **当前系统时间**: `{current_time.strftime('%Y-%m-%d %H:%M:%S')}`
+        - **时间差**: `{(current_time - latest['receive_time']).total_seconds():.1f}秒前`
         """)
         
         # 延迟状态指示器
         if latest['delay_ms'] < 200:
-            st.success("✅ 延迟状态: 优秀")
+            st.success("✅ 延迟状态: 优秀 (<200ms)")
         elif latest['delay_ms'] < 400:
-            st.warning("⚠️ 延迟状态: 良好")
+            st.warning("⚠️ 延迟状态: 良好 (200-400ms)")
         else:
-            st.error("🔴 延迟状态: 较差")
+            st.error("🔴 延迟状态: 较差 (>400ms)")
     else:
         st.info("等待接收心跳数据...")
 
@@ -389,8 +424,9 @@ with col2:
     if simulator.timeout_events:
         timeout_df = pd.DataFrame([
             {
-                "时间": e['time'].strftime('%H:%M:%S'),
-                "持续时长": f"{e['duration']:.1f}秒"
+                "超时时间": e['time'].strftime('%H:%M:%S'),
+                "持续时长": f"{e['duration']:.1f}秒",
+                "距离现在": f"{(datetime.datetime.now() - e['time']).seconds}秒前"
             }
             for e in list(simulator.timeout_events)[-5:]  # 显示最近5条
         ])
@@ -406,13 +442,17 @@ with col2:
         st.success("✅ 无超时事件")
 
 # --------------------------
-# 11. 传输统计图表
+# 12. 传输统计图表（横坐标为时间）
 # --------------------------
 st.subheader("📊 传输统计")
+
 if simulator.heartbeat_history:
-    # 创建延迟分布直方图
-    delays = [r['delay_ms'] for r in simulator.heartbeat_history]
+    # 准备数据
+    sequences = [r['sequence'] for r in simulator.heartbeat_history[-50:]]
+    delays = [r['delay_ms'] for r in simulator.heartbeat_history[-50:]]
+    receive_times = [r['receive_time'] for r in simulator.heartbeat_history[-50:]]
     
+    # 创建延迟分布直方图和时间序列图
     fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
     
     # 延迟分布直方图
@@ -424,18 +464,18 @@ if simulator.heartbeat_history:
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # 延迟趋势图（最近50个）
-    recent_sequences = [r['sequence'] for r in simulator.heartbeat_history[-50:]]
-    recent_delays = [r['delay_ms'] for r in simulator.heartbeat_history[-50:]]
-    ax2.plot(recent_sequences, recent_delays, 'b-', linewidth=2, alpha=0.7)
-    ax2.scatter(recent_sequences, recent_delays, c='red', s=30, alpha=0.5)
-    ax2.set_xlabel('心跳序号')
-    ax2.set_ylabel('延迟 (ms)')
-    ax2.set_title('延迟变化趋势（最近50个）')
+    # 延迟时间序列图（横坐标为时间）
+    ax2.plot(receive_times, delays, 'b-', linewidth=2, alpha=0.7)
+    ax2.scatter(receive_times, delays, c='red', s=30, alpha=0.5)
+    ax2.set_xlabel('接收时间', fontsize=10, fontweight='bold')
+    ax2.set_ylabel('延迟 (ms)', fontsize=10, fontweight='bold')
+    ax2.set_title('延迟变化趋势（最近50个）', fontsize=12, fontweight='bold')
     ax2.grid(True, alpha=0.3)
     
-    # 设置x轴为整数
-    ax2.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+    # 设置x轴为时间格式
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+    ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
+    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
     
     plt.tight_layout()
     st.pyplot(fig2)
@@ -444,7 +484,7 @@ else:
     st.info("等待足够数据进行统计图表展示...")
 
 # --------------------------
-# 12. 自动刷新机制
+# 13. 自动刷新机制
 # --------------------------
 if st.session_state.running:
     # 添加进度条显示下次刷新时间
@@ -459,7 +499,7 @@ if st.session_state.running:
     st.rerun()
 
 # --------------------------
-# 13. 使用说明
+# 14. 使用说明
 # --------------------------
 with st.expander("📖 详细使用说明"):
     st.markdown("""
@@ -471,31 +511,37 @@ with st.expander("📖 详细使用说明"):
     - **网络模拟**: 10% 随机丢包率，100-500ms 随机延迟
     
     #### 2. 实时监控
-    - **延迟监控**: 实时显示每个心跳的延迟时间
+    - **延迟监控**: 实时显示每个心跳的延迟时间（横坐标为接收时间）
     - **超时检测**: 3秒未收到心跳自动报警
     - **丢包统计**: 自动统计丢包率和丢失数量
     
     #### 3. 可视化图表
-    - **延迟监控图**: 显示心跳延迟变化趋势
-    - **序号接收图**: 显示心跳序号接收顺序
+    - **延迟监控图**: 显示心跳延迟随时间变化趋势
+    - **序号接收图**: 显示心跳序号随时间接收情况
     - **延迟分布图**: 统计延迟的分布情况
-    - **趋势分析图**: 显示最近50个心跳的延迟变化
+    - **趋势分析图**: 显示最近50个心跳的延迟随时间变化
     
-    #### 4. 操作指南
+    #### 4. 时间显示
+    - **系统时间**: 实时显示电脑本地时间
+    - **接收时间**: 每个心跳包的接收时间
+    - **时间差**: 显示最新心跳距离当前时间
+    - **超时时间**: 记录每次超时发生的具体时间
+    
+    #### 5. 操作指南
     1. 点击 **「开始监控」** 启动心跳模拟和监控
     2. 调整 **「刷新频率」** 控制图表更新速度
     3. 开启 **「自动滚动」** 自动显示最新数据
     4. 点击 **「停止监控」** 暂停数据采集
     5. 点击 **「重置数据」** 清空所有历史数据
     
-    #### 5. 指标说明
+    #### 6. 指标说明
     - **成功接收**: 成功接收的心跳包总数
     - **超时事件**: 发生超时的总次数
     - **平均延迟**: 所有成功接收心跳的平均延迟
     - **丢包率**: 丢失数据包占总发送量的百分比
     - **运行时长**: 系统持续运行的时间
     
-    #### 6. 颜色标识
+    #### 7. 颜色标识
     - 🟢 **绿色**: 延迟优秀（<200ms）
     - 🟡 **黄色**: 延迟良好（200-400ms）
     - 🔴 **红色**: 延迟较差（>400ms）
