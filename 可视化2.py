@@ -112,10 +112,23 @@ class DroneHeartbeatSimulator:
         }
 
 # --------------------------
-# 2. 图表绘制函数（横坐标改为时间）
+# 2. 时间显示函数
+# --------------------------
+def get_current_time_info():
+    """获取当前时间信息"""
+    now = datetime.datetime.now()
+    return {
+        'datetime': now,
+        'time_str': now.strftime('%Y年%m月%d日 %H:%M:%S'),
+        'weekday': now.strftime('%A'),
+        'timestamp': now.timestamp()
+    }
+
+# --------------------------
+# 3. 图表绘制函数（横坐标改为时间）
 # --------------------------
 def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, timeout_events):
-    """创建心跳监控图表，横坐标为时间"""
+    """创建心跳监控图表，横坐标为接收时间"""
     plt.style.use('seaborn-v0_8-darkgrid')
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
     
@@ -196,19 +209,6 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
     return fig
 
 # --------------------------
-# 3. 时间显示函数
-# --------------------------
-def get_current_time_info():
-    """获取当前时间信息"""
-    now = datetime.datetime.now()
-    return {
-        'datetime': now,
-        'time_str': now.strftime('%Y年%m月%d日 %H:%M:%S'),
-        'weekday': now.strftime('%A'),
-        'timestamp': now.timestamp()
-    }
-
-# --------------------------
 # 4. Streamlit 页面配置
 # --------------------------
 st.set_page_config(page_title="无人机心跳监控系统", layout="wide", page_icon="🚁")
@@ -237,14 +237,20 @@ st.markdown("""
         100% { opacity: 1; }
     }
     .time-display {
-        background-color: #1f77b4;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
-        padding: 10px;
-        border-radius: 5px;
+        padding: 15px;
+        border-radius: 10px;
         text-align: center;
-        font-size: 20px;
+        font-size: 24px;
         font-weight: bold;
         margin-bottom: 20px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .time-sub {
+        font-size: 14px;
+        opacity: 0.9;
+        margin-top: 5px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -266,16 +272,14 @@ if "update_counter" not in st.session_state:
 # --------------------------
 st.title("🚁 无人机心跳实时可视化监控系统")
 
-# 实时时间显示
+# 实时时间显示区域
 current_time_info = get_current_time_info()
-time_col1, time_col2, time_col3 = st.columns([1, 2, 1])
-with time_col2:
-    st.markdown(f"""
-    <div class="time-display">
-        📅 {current_time_info['time_str']}<br>
-        📍 {current_time_info['weekday']}
-    </div>
-    """, unsafe_allow_html=True)
+st.markdown(f"""
+<div class="time-display">
+    📅 {current_time_info['time_str']}<br>
+    <div class="time-sub">📍 {current_time_info['weekday']} | 系统时间与电脑时间同步</div>
+</div>
+""", unsafe_allow_html=True)
 
 st.markdown("实时监控无人机心跳数据，包含延迟分析和超时检测")
 
@@ -327,10 +331,11 @@ if st.session_state.running:
         st.session_state.update_counter += 1
         
         # 显示实时通知
+        current_time_str = datetime.datetime.now().strftime('%H:%M:%S')
         if record:
             st.toast(f"✅ 心跳 #{record['sequence']} | 延迟: {record['delay_ms']:.1f}ms | 时间: {record['receive_time'].strftime('%H:%M:%S')}", icon="✅")
         else:
-            st.toast(f"⚠️ 心跳丢失 | 时间: {datetime.datetime.now().strftime('%H:%M:%S')}", icon="⚠️")
+            st.toast(f"⚠️ 心跳丢失 | 时间: {current_time_str}", icon="⚠️")
 
 # --------------------------
 # 9. 统计指标显示
@@ -375,7 +380,7 @@ st.markdown("---")
 chart_container = st.container()
 
 with chart_container:
-    # 获取最新数据
+    # 获取最新数据（包含接收时间）
     sequences, delays, receive_times = simulator.get_recent_data(window_size=30)
     
     # 创建并显示图表
@@ -445,14 +450,12 @@ with col2:
 # 12. 传输统计图表（横坐标为时间）
 # --------------------------
 st.subheader("📊 传输统计")
-
 if simulator.heartbeat_history:
     # 准备数据
-    sequences = [r['sequence'] for r in simulator.heartbeat_history[-50:]]
     delays = [r['delay_ms'] for r in simulator.heartbeat_history[-50:]]
+    sequences = [r['sequence'] for r in simulator.heartbeat_history[-50:]]
     receive_times = [r['receive_time'] for r in simulator.heartbeat_history[-50:]]
     
-    # 创建延迟分布直方图和时间序列图
     fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
     
     # 延迟分布直方图
