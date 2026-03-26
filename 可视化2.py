@@ -8,6 +8,10 @@ import matplotlib.dates as mdates
 import streamlit as st
 import numpy as np
 import pandas as pd
+import pytz
+
+# 设置北京时区
+BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 
 # --------------------------
 # 1. 模拟器类定义
@@ -24,9 +28,13 @@ class DroneHeartbeatSimulator:
         self.total_lost = 0
         self.last_timeout_time = 0
 
+    def get_beijing_time(self):
+        """获取北京时间"""
+        return datetime.datetime.now(BEIJING_TZ)
+    
     def generate_heartbeat(self):
         """生成单条心跳数据"""
-        timestamp = datetime.datetime.now()
+        timestamp = self.get_beijing_time()
         self.total_sent += 1
         
         # 模拟10%丢包率
@@ -40,7 +48,7 @@ class DroneHeartbeatSimulator:
         delay_ms = random.uniform(100, 500)
         time.sleep(delay_ms / 1000)  # 按毫秒级延迟等待
         
-        receive_time = datetime.datetime.now()
+        receive_time = self.get_beijing_time()
         record = {
             'sequence': self.sequence_number,
             'send_time': timestamp,
@@ -65,7 +73,7 @@ class DroneHeartbeatSimulator:
             # 避免重复记录同一个超时事件
             if current_time - self.last_timeout_time > 1:
                 self.timeout_events.append({
-                    'time': datetime.datetime.now(),
+                    'time': self.get_beijing_time(),
                     'duration': current_time - self.last_received_time
                 })
                 self.last_timeout_time = current_time
@@ -112,23 +120,30 @@ class DroneHeartbeatSimulator:
         }
 
 # --------------------------
-# 2. 时间显示函数
+# 2. 时间显示函数（北京时间）
 # --------------------------
-def get_current_time_info():
-    """获取当前时间信息"""
-    now = datetime.datetime.now()
+def get_beijing_time_info():
+    """获取北京时间信息"""
+    now = datetime.datetime.now(BEIJING_TZ)
     return {
         'datetime': now,
         'time_str': now.strftime('%Y年%m月%d日 %H:%M:%S'),
         'weekday': now.strftime('%A'),
-        'timestamp': now.timestamp()
+        'timestamp': now.timestamp(),
+        'timezone': 'Asia/Shanghai (UTC+8)'
     }
 
+def format_beijing_time(dt):
+    """格式化北京时间"""
+    if dt.tzinfo is None:
+        dt = BEIJING_TZ.localize(dt)
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
+
 # --------------------------
-# 3. 图表绘制函数（横坐标改为时间）
+# 3. 图表绘制函数（横坐标为北京时间）
 # --------------------------
 def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, timeout_events):
-    """创建心跳监控图表，横坐标为接收时间"""
+    """创建心跳监控图表，横坐标为北京时间"""
     plt.style.use('seaborn-v0_8-darkgrid')
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
     
@@ -136,9 +151,9 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
         # ========== 子图1：延迟监控（横坐标为时间） ==========
         ax1.plot(receive_times, delays, 'b-o', markersize=6, linewidth=2, 
                 markeredgecolor='darkblue', markeredgewidth=1)
-        ax1.set_xlabel('接收时间', fontsize=12, fontweight='bold')
+        ax1.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
         ax1.set_ylabel('延迟 (ms)', fontsize=12, fontweight='bold')
-        ax1.set_title('实时心跳延迟监控（按时间）', fontsize=14, fontweight='bold')
+        ax1.set_title('实时心跳延迟监控（按北京时间）', fontsize=14, fontweight='bold')
         ax1.grid(True, alpha=0.3, linestyle='--')
         
         # 设置x轴为时间格式
@@ -169,9 +184,9 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
         # ========== 子图2：序号接收情况（横坐标为时间） ==========
         ax2.plot(receive_times, sequences, 'g-o', markersize=6, linewidth=2,
                 markeredgecolor='darkgreen', markeredgewidth=1)
-        ax2.set_xlabel('接收时间', fontsize=12, fontweight='bold')
+        ax2.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
         ax2.set_ylabel('心跳序号', fontsize=12, fontweight='bold')
-        ax2.set_title(f'心跳序号接收情况（按时间） | 超时次数: {timeout_count}', 
+        ax2.set_title(f'心跳序号接收情况（按北京时间） | 超时次数: {timeout_count}', 
                      fontsize=14, fontweight='bold')
         ax2.grid(True, alpha=0.3, linestyle='--')
         
@@ -189,8 +204,9 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
         
         # 显示超时警告
         if timeout_events:
+            now_beijing = datetime.datetime.now(BEIJING_TZ)
             recent_timeouts = [e for e in timeout_events 
-                             if (datetime.datetime.now() - e['time']).seconds < 10]
+                             if (now_beijing - e['time']).total_seconds() < 10]
             if recent_timeouts:
                 ax2.text(0.02, 0.98, f"⚠️ 最近超时: {len(recent_timeouts)}次", 
                         transform=ax2.transAxes, fontsize=11, 
@@ -211,7 +227,7 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
 # --------------------------
 # 4. Streamlit 页面配置
 # --------------------------
-st.set_page_config(page_title="无人机心跳监控系统", layout="wide", page_icon="🚁")
+st.set_page_config(page_title="无人机心跳监控系统（北京时间）", layout="wide", page_icon="🚁")
 
 # 自定义CSS
 st.markdown("""
@@ -252,6 +268,16 @@ st.markdown("""
         opacity: 0.9;
         margin-top: 5px;
     }
+    .beijing-badge {
+        background-color: #ff6b6b;
+        color: white;
+        padding: 5px 10px;
+        border-radius: 5px;
+        font-size: 12px;
+        font-weight: bold;
+        display: inline-block;
+        margin-left: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -268,20 +294,21 @@ if "update_counter" not in st.session_state:
     st.session_state.update_counter = 0
 
 # --------------------------
-# 6. 标题和实时时间显示
+# 6. 标题和实时时间显示（北京时间）
 # --------------------------
 st.title("🚁 无人机心跳实时可视化监控系统")
+st.markdown('<span class="beijing-badge">🇨🇳 北京时间 (UTC+8)</span>', unsafe_allow_html=True)
 
 # 实时时间显示区域
-current_time_info = get_current_time_info()
+current_time_info = get_beijing_time_info()
 st.markdown(f"""
 <div class="time-display">
-    📅 {current_time_info['time_str']}<br>
-    <div class="time-sub">📍 {current_time_info['weekday']} | 系统时间与电脑时间同步</div>
+    🕐 {current_time_info['time_str']}<br>
+    <div class="time-sub">📍 {current_time_info['weekday']} | 时区: {current_time_info['timezone']}</div>
 </div>
 """, unsafe_allow_html=True)
 
-st.markdown("实时监控无人机心跳数据，包含延迟分析和超时检测")
+st.markdown("实时监控无人机心跳数据，包含延迟分析和超时检测 | 所有时间均为北京时间")
 
 # --------------------------
 # 7. 控制面板
@@ -331,11 +358,11 @@ if st.session_state.running:
         st.session_state.update_counter += 1
         
         # 显示实时通知
-        current_time_str = datetime.datetime.now().strftime('%H:%M:%S')
+        current_beijing_time = simulator.get_beijing_time()
         if record:
-            st.toast(f"✅ 心跳 #{record['sequence']} | 延迟: {record['delay_ms']:.1f}ms | 时间: {record['receive_time'].strftime('%H:%M:%S')}", icon="✅")
+            st.toast(f"✅ 心跳 #{record['sequence']} | 延迟: {record['delay_ms']:.1f}ms | 北京时间: {record['receive_time'].strftime('%H:%M:%S')}", icon="✅")
         else:
-            st.toast(f"⚠️ 心跳丢失 | 时间: {current_time_str}", icon="⚠️")
+            st.toast(f"⚠️ 心跳丢失 | 北京时间: {current_beijing_time.strftime('%H:%M:%S')}", icon="⚠️")
 
 # --------------------------
 # 9. 统计指标显示
@@ -374,7 +401,7 @@ with col5:
 st.markdown("---")
 
 # --------------------------
-# 10. 实时图表显示（横坐标为时间）
+# 10. 实时图表显示（横坐标为北京时间）
 # --------------------------
 # 创建图表容器
 chart_container = st.container()
@@ -395,23 +422,23 @@ with chart_container:
     plt.close(fig)
 
 # --------------------------
-# 11. 实时状态面板
+# 11. 实时状态面板（北京时间）
 # --------------------------
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("📡 最新心跳信息")
+    st.subheader("📡 最新心跳信息（北京时间）")
     if simulator.heartbeat_history:
         latest = simulator.heartbeat_history[-1]
-        current_time = datetime.datetime.now()
+        current_beijing = simulator.get_beijing_time()
         
         st.markdown(f"""
         - **序号**: `{latest['sequence']}`
         - **延迟**: `{latest['delay_ms']:.1f} ms`
         - **接收时间**: `{latest['receive_time'].strftime('%Y-%m-%d %H:%M:%S')}`
         - **发送时间**: `{latest['send_time'].strftime('%Y-%m-%d %H:%M:%S')}`
-        - **当前系统时间**: `{current_time.strftime('%Y-%m-%d %H:%M:%S')}`
-        - **时间差**: `{(current_time - latest['receive_time']).total_seconds():.1f}秒前`
+        - **当前北京时间**: `{current_beijing.strftime('%Y-%m-%d %H:%M:%S')}`
+        - **时间差**: `{(current_beijing - latest['receive_time']).total_seconds():.1f}秒前`
         """)
         
         # 延迟状态指示器
@@ -425,13 +452,14 @@ with col1:
         st.info("等待接收心跳数据...")
 
 with col2:
-    st.subheader("⚠️ 最近超时事件")
+    st.subheader("⚠️ 最近超时事件（北京时间）")
     if simulator.timeout_events:
+        current_beijing = simulator.get_beijing_time()
         timeout_df = pd.DataFrame([
             {
                 "超时时间": e['time'].strftime('%H:%M:%S'),
                 "持续时长": f"{e['duration']:.1f}秒",
-                "距离现在": f"{(datetime.datetime.now() - e['time']).seconds}秒前"
+                "距离现在": f"{(current_beijing - e['time']).total_seconds():.0f}秒前"
             }
             for e in list(simulator.timeout_events)[-5:]  # 显示最近5条
         ])
@@ -439,7 +467,7 @@ with col2:
         
         # 超时警告指示器
         recent_timeout = [e for e in simulator.timeout_events 
-                         if (datetime.datetime.now() - e['time']).seconds < 10]
+                         if (simulator.get_beijing_time() - e['time']).total_seconds() < 10]
         if recent_timeout:
             st.markdown('<p class="warning-text">⚠️ 最近10秒内有超时发生！</p>', 
                        unsafe_allow_html=True)
@@ -447,9 +475,9 @@ with col2:
         st.success("✅ 无超时事件")
 
 # --------------------------
-# 12. 传输统计图表（横坐标为时间）
+# 12. 传输统计图表（横坐标为北京时间）
 # --------------------------
-st.subheader("📊 传输统计")
+st.subheader("📊 传输统计（北京时间）")
 if simulator.heartbeat_history:
     # 准备数据
     delays = [r['delay_ms'] for r in simulator.heartbeat_history[-50:]]
@@ -467,10 +495,10 @@ if simulator.heartbeat_history:
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # 延迟时间序列图（横坐标为时间）
+    # 延迟时间序列图（横坐标为北京时间）
     ax2.plot(receive_times, delays, 'b-', linewidth=2, alpha=0.7)
     ax2.scatter(receive_times, delays, c='red', s=30, alpha=0.5)
-    ax2.set_xlabel('接收时间', fontsize=10, fontweight='bold')
+    ax2.set_xlabel('接收时间（北京时间）', fontsize=10, fontweight='bold')
     ax2.set_ylabel('延迟 (ms)', fontsize=10, fontweight='bold')
     ax2.set_title('延迟变化趋势（最近50个）', fontsize=12, fontweight='bold')
     ax2.grid(True, alpha=0.3)
@@ -508,43 +536,49 @@ with st.expander("📖 详细使用说明"):
     st.markdown("""
     ### 🎯 系统功能
     
-    #### 1. 心跳模拟
+    #### 1. 时间标准
+    - **时区设置**: 所有时间均采用北京时间 (UTC+8 / Asia/Shanghai)
+    - **时间同步**: 与电脑系统时间保持一致，自动转换到北京时间
+    - **时间显示**: 所有图表和数据显示均为北京时间
+    
+    #### 2. 心跳模拟
     - **发送频率**: 每秒自动发送一次心跳包
-    - **数据包内容**: 包含序号、时间戳等信息
+    - **数据包内容**: 包含序号、北京时间戳等信息
     - **网络模拟**: 10% 随机丢包率，100-500ms 随机延迟
     
-    #### 2. 实时监控
-    - **延迟监控**: 实时显示每个心跳的延迟时间（横坐标为接收时间）
+    #### 3. 实时监控
+    - **延迟监控**: 实时显示每个心跳的延迟时间（横坐标为北京时间）
     - **超时检测**: 3秒未收到心跳自动报警
     - **丢包统计**: 自动统计丢包率和丢失数量
     
-    #### 3. 可视化图表
-    - **延迟监控图**: 显示心跳延迟随时间变化趋势
-    - **序号接收图**: 显示心跳序号随时间接收情况
+    #### 4. 可视化图表
+    - **延迟监控图**: 显示心跳延迟随时间变化趋势（北京时间）
+    - **序号接收图**: 显示心跳序号随时间接收情况（北京时间）
     - **延迟分布图**: 统计延迟的分布情况
     - **趋势分析图**: 显示最近50个心跳的延迟随时间变化
     
-    #### 4. 时间显示
-    - **系统时间**: 实时显示电脑本地时间
-    - **接收时间**: 每个心跳包的接收时间
+    #### 5. 时间显示
+    - **系统时间**: 实时显示当前北京时间
+    - **接收时间**: 每个心跳包的接收时间（北京时间）
+    - **发送时间**: 每个心跳包的发送时间（北京时间）
     - **时间差**: 显示最新心跳距离当前时间
-    - **超时时间**: 记录每次超时发生的具体时间
+    - **超时时间**: 记录每次超时发生的具体北京时间
     
-    #### 5. 操作指南
+    #### 6. 操作指南
     1. 点击 **「开始监控」** 启动心跳模拟和监控
     2. 调整 **「刷新频率」** 控制图表更新速度
     3. 开启 **「自动滚动」** 自动显示最新数据
     4. 点击 **「停止监控」** 暂停数据采集
     5. 点击 **「重置数据」** 清空所有历史数据
     
-    #### 6. 指标说明
+    #### 7. 指标说明
     - **成功接收**: 成功接收的心跳包总数
     - **超时事件**: 发生超时的总次数
     - **平均延迟**: 所有成功接收心跳的平均延迟
     - **丢包率**: 丢失数据包占总发送量的百分比
     - **运行时长**: 系统持续运行的时间
     
-    #### 7. 颜色标识
+    #### 8. 颜色标识
     - 🟢 **绿色**: 延迟优秀（<200ms）
     - 🟡 **黄色**: 延迟良好（200-400ms）
     - 🔴 **红色**: 延迟较差（>400ms）
