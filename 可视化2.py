@@ -480,7 +480,14 @@ with col2:
 st.subheader("📊 传输统计（北京时间）")
 if simulator.heartbeat_history:
     # 准备数据
-    delays = [r['delay_ms'] for r in simulator.heartbeat_history[-50:]]
+   if simulator.heartbeat_history:
+    delays = [
+        r['delay_ms'] 
+        for r in simulator.heartbeat_history[-50:] 
+        if isinstance(r, dict) and 'delay_ms' in r
+    ]
+else:
+    delays = []
     sequences = [r['sequence'] for r in simulator.heartbeat_history[-50:]]
     receive_times = [r['receive_time'] for r in simulator.heartbeat_history[-50:]]
     
