@@ -452,7 +452,7 @@ with col1:
         st.info("等待接收心跳数据...")
 
 with col2:
-    st.subheader("⚠️ 最近超时事件（北京时间）")
+    st.subheader("最近超时事件（北京时间）")
     if simulator.timeout_events:
         current_beijing = simulator.get_beijing_time()
         timeout_df = pd.DataFrame([
