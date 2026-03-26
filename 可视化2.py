@@ -285,3 +285,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+    import streamlit as st
+st.title("我的可视化应用")
+st.write("Hello, Streamlit!")
