@@ -20,7 +20,6 @@ class DroneHeartbeatSimulator:
         self.received_heartbeats = queue.Queue()
         self.heartbeat_history = deque(maxlen=100)  # 存储最近100条心跳记录
         self.timeout_events = []  # 存储超时事件
-        self.start_time = time.time()  # 记录开始时间
         
         # 启动发送线程和接收线程
         self.send_thread = threading.Thread(target=self._send_heartbeat)
@@ -141,7 +140,7 @@ class DroneHeartbeatSimulator:
         return sequences, delays, timestamps
     
     def plot_heartbeat_data(self, duration_seconds=30):
-        """实时绘制心跳数据，横坐标显示为整数"""
+        """实时绘制心跳数据，确保横坐标显示为整数"""
         plt.style.use('seaborn-v0_8-darkgrid')
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
         
@@ -151,7 +150,7 @@ class DroneHeartbeatSimulator:
             
             if sequences:
                 # 只显示最近的数据点
-                window_size = min(len(sequences), 30)
+                window_size = min(len(sequences), 20)
                 recent_sequences = sequences[-window_size:]
                 recent_delays = delays[-window_size:]
                 recent_timestamps = timestamps[-window_size:]
@@ -160,20 +159,19 @@ class DroneHeartbeatSimulator:
                 ax1.clear()
                 ax2.clear()
                 
-                # ===== 绘制延迟图 =====
-                # 使用序号作为x轴数据
-                x_values = recent_sequences
-                ax1.plot(x_values, recent_delays, 'b-o', markersize=6, linewidth=2, markeredgecolor='darkblue')
+                # ========== 图1：心跳延迟监控 ==========
+                ax1.plot(recent_sequences, recent_delays, 'b-o', markersize=6, linewidth=2, markeredgecolor='darkblue')
                 ax1.set_xlabel('心跳序号', fontsize=12)
                 ax1.set_ylabel('延迟 (ms)', fontsize=12)
                 ax1.set_title('无人机心跳延迟监控', fontsize=14, fontweight='bold')
                 ax1.grid(True, alpha=0.3, linestyle='--')
                 
                 # 设置x轴为整数刻度
+                ax1.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+                ax1.xaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
+                
+                # 设置x轴范围，确保整数刻度完整显示
                 if recent_sequences:
-                    ax1.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-                    ax1.xaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
-                    # 设置x轴范围，留出一些边距
                     ax1.set_xlim(min(recent_sequences) - 0.5, max(recent_sequences) + 0.5)
                 
                 # 添加平均延迟线
@@ -183,15 +181,8 @@ class DroneHeartbeatSimulator:
                                label=f'平均延迟: {avg_delay:.1f}ms')
                     ax1.legend(loc='upper right', fontsize=10)
                 
-                # 添加延迟标准差
-                if len(recent_delays) > 1:
-                    std_delay = (sum((d - avg_delay)**2 for d in recent_delays) / len(recent_delays))**0.5
-                    ax1.text(0.02, 0.98, f'延迟标准差: {std_delay:.1f}ms', 
-                            transform=ax1.transAxes, fontsize=9,
-                            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
-                
-                # ===== 绘制心跳序号接收顺序图 =====
-                # 使用索引作为x轴（接收顺序），序号作为y轴
+                # ========== 图2：心跳序号接收顺序 ==========
+                # 使用索引作为x轴（接收顺序）
                 indices = list(range(len(recent_sequences)))
                 ax2.plot(indices, recent_sequences, 'g-o', markersize=6, linewidth=2, markeredgecolor='darkgreen')
                 ax2.set_xlabel('接收顺序（按时间排序）', fontsize=12)
@@ -199,33 +190,30 @@ class DroneHeartbeatSimulator:
                 ax2.set_title('心跳序号接收顺序', fontsize=14, fontweight='bold')
                 ax2.grid(True, alpha=0.3, linestyle='--')
                 
-                # 设置y轴为整数刻度
-                if recent_sequences:
-                    ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-                    ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
-                    # 设置y轴范围
-                    ax2.set_ylim(min(recent_sequences) - 0.5, max(recent_sequences) + 0.5)
-                
-                # 设置x轴为整数刻度
+                # 设置x轴和y轴为整数刻度
                 ax2.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
                 ax2.xaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
+                ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+                ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
                 
-                # 显示超时事件统计
+                # 设置y轴范围
+                if recent_sequences:
+                    ax2.set_ylim(min(recent_sequences) - 0.5, max(recent_sequences) + 0.5)
+                
+                # 显示超时事件
                 if self.timeout_events:
                     recent_timeouts = [e for e in self.timeout_events 
                                      if (datetime.datetime.now() - e['time']).seconds < 60]
                     if recent_timeouts:
-                        timeout_text = f"最近60秒超时次数: {len(recent_timeouts)}"
-                        ax2.text(0.02, 0.98, timeout_text, 
+                        ax2.text(0.02, 0.98, f"超时次数: {len(recent_timeouts)}", 
                                 transform=ax2.transAxes, fontsize=10, 
                                 verticalalignment='top', 
                                 bbox=dict(boxstyle='round', facecolor='salmon', alpha=0.7))
                 
-                # 添加理想线（y=x）
+                # 添加理想线（理想情况下序号应该连续）
                 if indices and recent_sequences:
-                    # 添加理想情况下的接收顺序线（序号应该连续增加）
                     ideal_line = [min(recent_sequences) + i for i in range(len(indices))]
-                    ax2.plot(indices, ideal_line, 'r--', linewidth=1.5, alpha=0.5, label='理想情况')
+                    ax2.plot(indices, ideal_line, 'r--', linewidth=1.5, alpha=0.5, label='理想接收线')
                     ax2.legend(loc='upper left', fontsize=9)
             
             plt.tight_layout()
@@ -235,7 +223,10 @@ class DroneHeartbeatSimulator:
         ani = animation.FuncAnimation(fig, animate, interval=1000, cache_frame_data=False)
         
         # 设置窗口标题
-        fig.canvas.manager.set_window_title('无人机心跳监控系统')
+        try:
+            fig.canvas.manager.set_window_title('无人机心跳监控系统')
+        except:
+            pass
         
         plt.show()
 
@@ -274,7 +265,7 @@ def main():
         
         # 显示可视化
         print("\n正在打开可视化窗口...")
-        print("提示: 图表横坐标将显示为整数")
+        print("提示: 两个图表的横坐标都将显示为整数")
         simulator.plot_heartbeat_data()
         
     except KeyboardInterrupt:
@@ -285,19 +276,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    import streamlit as st
-st.title("我的可视化应用")
-st.write("Hello, Streamlit!")
-import streamlit as st
-import pandas as pd
-import matplotlib.pyplot as plt
-
-st.title("我的可视化应用")
-st.write("你好，Streamlit!")
-
-# 示例：简单折线图
-df = pd.DataFrame({
-    'x': [1, 2, 3, 4, 5],
-    'y': [10, 20, 15, 25, 30]
-})
-st.line_chart(df, x='x', y='y')
+    
