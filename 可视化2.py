@@ -84,10 +84,15 @@ class DroneHeartbeatSimulator:
         delays = []
         receive_times = []
         
+        # 安全地获取数据
+        if not self.heartbeat_history:
+            return sequences, delays, receive_times
+        
         for record in self.heartbeat_history:
-            sequences.append(record['sequence'])
-            delays.append(record['delay_ms'])
-            receive_times.append(record['receive_time'])
+            if record and isinstance(record, dict):
+                sequences.append(record.get('sequence', 0))
+                delays.append(record.get('delay_ms', 0))
+                receive_times.append(record.get('receive_time', datetime.datetime.now(BEIJING_TZ)))
         
         # 只返回最近的数据
         if len(sequences) > window_size:
@@ -99,7 +104,7 @@ class DroneHeartbeatSimulator:
     
     def get_statistics(self):
         """获取统计信息"""
-        if not self.heartbeat_history:
+        if not self.heartbeat_history or len(self.heartbeat_history) == 0:
             return {
                 'avg_delay': 0,
                 'min_delay': 0,
@@ -108,7 +113,20 @@ class DroneHeartbeatSimulator:
                 'received_count': 0
             }
         
-        delays = [r['delay_ms'] for r in self.heartbeat_history]
+        delays = []
+        for r in self.heartbeat_history:
+            if r and isinstance(r, dict) and 'delay_ms' in r:
+                delays.append(r['delay_ms'])
+        
+        if not delays:
+            return {
+                'avg_delay': 0,
+                'min_delay': 0,
+                'max_delay': 0,
+                'packet_loss_rate': 0,
+                'received_count': len(self.heartbeat_history)
+            }
+        
         packet_loss_rate = (self.total_lost / self.total_sent * 100) if self.total_sent > 0 else 0
         
         return {
@@ -135,6 +153,8 @@ def get_beijing_time_info():
 
 def format_beijing_time(dt):
     """格式化北京时间"""
+    if dt is None:
+        return "N/A"
     if dt.tzinfo is None:
         dt = BEIJING_TZ.localize(dt)
     return dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -147,71 +167,80 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
     plt.style.use('seaborn-v0_8-darkgrid')
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
     
-    if sequences and delays and receive_times:
-        # ========== 子图1：延迟监控（横坐标为时间） ==========
-        ax1.plot(receive_times, delays, 'b-o', markersize=6, linewidth=2, 
-                markeredgecolor='darkblue', markeredgewidth=1)
-        ax1.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
-        ax1.set_ylabel('延迟 (ms)', fontsize=12, fontweight='bold')
-        ax1.set_title('实时心跳延迟监控（按北京时间）', fontsize=14, fontweight='bold')
-        ax1.grid(True, alpha=0.3, linestyle='--')
-        
-        # 设置x轴为时间格式
-        ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-        ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
-        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
-        
-        # 自动调整x轴范围
-        ax1.autoscale_view()
-        
-        # 添加平均延迟线
-        if delays:
-            avg_delay = sum(delays) / len(delays)
-            ax1.axhline(y=avg_delay, color='r', linestyle='--', linewidth=2,
-                       label=f'平均延迟: {avg_delay:.1f}ms')
-            ax1.legend(loc='upper right', fontsize=10)
-        
-        # 添加延迟阈值线
-        ax1.axhline(y=400, color='orange', linestyle=':', linewidth=1.5,
-                   label='延迟阈值: 400ms', alpha=0.7)
-        
-        # 填充超出阈值的区域
-        threshold = 400
-        above_threshold = [d if d > threshold else threshold for d in delays]
-        ax1.fill_between(receive_times, threshold, above_threshold, 
-                        alpha=0.3, color='red', label='超出阈值')
-        
-        # ========== 子图2：序号接收情况（横坐标为时间） ==========
-        ax2.plot(receive_times, sequences, 'g-o', markersize=6, linewidth=2,
-                markeredgecolor='darkgreen', markeredgewidth=1)
-        ax2.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
-        ax2.set_ylabel('心跳序号', fontsize=12, fontweight='bold')
-        ax2.set_title(f'心跳序号接收情况（按北京时间） | 超时次数: {timeout_count}', 
-                     fontsize=14, fontweight='bold')
-        ax2.grid(True, alpha=0.3, linestyle='--')
-        
-        # 设置x轴为时间格式
-        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-        ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
-        plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
-        
-        # 设置y轴为整数刻度
-        ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-        ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
-        
-        # 自动调整x轴范围
-        ax2.autoscale_view()
-        
-        # 显示超时警告
-        if timeout_events:
-            now_beijing = datetime.datetime.now(BEIJING_TZ)
-            recent_timeouts = [e for e in timeout_events 
-                             if (now_beijing - e['time']).total_seconds() < 10]
-            if recent_timeouts:
-                ax2.text(0.02, 0.98, f"⚠️ 最近超时: {len(recent_timeouts)}次", 
-                        transform=ax2.transAxes, fontsize=11, 
-                        verticalalignment='top', fontweight='bold',
-                        bbox=dict(boxstyle='round', facecolor='red', alpha=0.3))
+    # 检查是否有有效数据
+    if sequences and delays and receive_times and len(sequences) > 0:
+        try:
+            # ========== 子图1：延迟监控（横坐标为时间） ==========
+            ax1.plot(receive_times, delays, 'b-o', markersize=6, linewidth=2, 
+                    markeredgecolor='darkblue', markeredgewidth=1)
+            ax1.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
+            ax1.set_ylabel('延迟 (ms)', fontsize=12, fontweight='bold')
+            ax1.set_title('实时心跳延迟监控（按北京时间）', fontsize=14, fontweight='bold')
+            ax1.grid(True, alpha=0.3, linestyle='--')
+            
+            # 设置x轴为时间格式
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
+            plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            
+            # 自动调整x轴范围
+            ax1.autoscale_view()
+            
+            # 添加平均延迟线
+            if delays:
+                avg_delay = sum(delays) / len(delays)
+                ax1.axhline(y=avg_delay, color='r', linestyle='--', linewidth=2,
+                           label=f'平均延迟: {avg_delay:.1f}ms')
+                ax1.legend(loc='upper right', fontsize=10)
+            
+            # 添加延迟阈值线
+            ax1.axhline(y=400, color='orange', linestyle=':', linewidth=1.5,
+                       label='延迟阈值: 400ms', alpha=0.7)
+            
+            # 填充超出阈值的区域
+            threshold = 400
+            above_threshold = [d if d > threshold else threshold for d in delays]
+            ax1.fill_between(receive_times, threshold, above_threshold, 
+                            alpha=0.3, color='red', label='超出阈值')
+            
+            # ========== 子图2：序号接收情况（横坐标为时间） ==========
+            ax2.plot(receive_times, sequences, 'g-o', markersize=6, linewidth=2,
+                    markeredgecolor='darkgreen', markeredgewidth=1)
+            ax2.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
+            ax2.set_ylabel('心跳序号', fontsize=12, fontweight='bold')
+            ax2.set_title(f'心跳序号接收情况（按北京时间） | 超时次数: {timeout_count}', 
+                         fontsize=14, fontweight='bold')
+            ax2.grid(True, alpha=0.3, linestyle='--')
+            
+            # 设置x轴为时间格式
+            ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
+            plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            
+            # 设置y轴为整数刻度
+            ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+            ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
+            
+            # 自动调整x轴范围
+            ax2.autoscale_view()
+            
+            # 显示超时警告
+            if timeout_events and len(timeout_events) > 0:
+                now_beijing = datetime.datetime.now(BEIJING_TZ)
+                recent_timeouts = []
+                for e in timeout_events:
+                    if e and isinstance(e, dict) and 'time' in e:
+                        if (now_beijing - e['time']).total_seconds() < 10:
+                            recent_timeouts.append(e)
+                if recent_timeouts:
+                    ax2.text(0.02, 0.98, f"⚠️ 最近超时: {len(recent_timeouts)}次", 
+                            transform=ax2.transAxes, fontsize=11, 
+                            verticalalignment='top', fontweight='bold',
+                            bbox=dict(boxstyle='round', facecolor='red', alpha=0.3))
+        except Exception as e:
+            # 如果绘图出错，显示错误信息
+            ax1.text(0.5, 0.5, f'绘图错误: {str(e)}', ha='center', va='center', fontsize=12)
+            ax2.text(0.5, 0.5, '请检查数据', ha='center', va='center', fontsize=12)
     else:
         # 无数据时显示提示
         ax1.text(0.5, 0.5, '等待数据...', ha='center', va='center', fontsize=14)
@@ -375,11 +404,11 @@ col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     st.metric("📊 成功接收", stats['received_count'], 
-              delta=f"+{stats['received_count'] - (stats['received_count']-1) if stats['received_count'] > 0 else 0}",
-              help="成功接收的心跳包总数")
+              delta=None, help="成功接收的心跳包总数")
 
 with col2:
-    st.metric("⚠️ 超时事件", len(simulator.timeout_events), 
+    timeout_count = len(simulator.timeout_events) if simulator.timeout_events else 0
+    st.metric("⚠️ 超时事件", timeout_count, 
               delta=None, help="超时警告总次数")
 
 with col3:
@@ -390,8 +419,7 @@ with col3:
 with col4:
     loss_rate = stats['packet_loss_rate']
     st.metric("📉 丢包率", f"{loss_rate:.1f}%",
-              delta=f"{simulator.total_lost}/{simulator.total_sent}",
-              help="数据包丢失率")
+              delta=None, help="数据包丢失率")
 
 with col5:
     runtime = time.time() - simulator.start_time
@@ -407,19 +435,22 @@ st.markdown("---")
 chart_container = st.container()
 
 with chart_container:
-    # 获取最新数据（包含接收时间）
-    sequences, delays, receive_times = simulator.get_recent_data(window_size=30)
-    
-    # 创建并显示图表
-    fig = create_heartbeat_charts(
-        sequences, 
-        delays, 
-        receive_times,
-        len(simulator.timeout_events),
-        simulator.timeout_events
-    )
-    st.pyplot(fig)
-    plt.close(fig)
+    try:
+        # 获取最新数据（包含接收时间）
+        sequences, delays, receive_times = simulator.get_recent_data(window_size=30)
+        
+        # 创建并显示图表
+        fig = create_heartbeat_charts(
+            sequences, 
+            delays, 
+            receive_times,
+            len(simulator.timeout_events) if simulator.timeout_events else 0,
+            simulator.timeout_events if simulator.timeout_events else []
+        )
+        st.pyplot(fig)
+        plt.close(fig)
+    except Exception as e:
+        st.error(f"图表显示错误: {str(e)}")
 
 # --------------------------
 # 11. 实时状态面板（北京时间）
@@ -428,49 +459,65 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📡 最新心跳信息（北京时间）")
-    if simulator.heartbeat_history:
-        latest = simulator.heartbeat_history[-1]
-        current_beijing = simulator.get_beijing_time()
-        
-        st.markdown(f"""
-        - **序号**: `{latest['sequence']}`
-        - **延迟**: `{latest['delay_ms']:.1f} ms`
-        - **接收时间**: `{latest['receive_time'].strftime('%Y-%m-%d %H:%M:%S')}`
-        - **发送时间**: `{latest['send_time'].strftime('%Y-%m-%d %H:%M:%S')}`
-        - **当前北京时间**: `{current_beijing.strftime('%Y-%m-%d %H:%M:%S')}`
-        - **时间差**: `{(current_beijing - latest['receive_time']).total_seconds():.1f}秒前`
-        """)
-        
-        # 延迟状态指示器
-        if latest['delay_ms'] < 200:
-            st.success("✅ 延迟状态: 优秀 (<200ms)")
-        elif latest['delay_ms'] < 400:
-            st.warning("⚠️ 延迟状态: 良好 (200-400ms)")
-        else:
-            st.error("🔴 延迟状态: 较差 (>400ms)")
+    if simulator.heartbeat_history and len(simulator.heartbeat_history) > 0:
+        try:
+            latest = simulator.heartbeat_history[-1]
+            current_beijing = simulator.get_beijing_time()
+            
+            st.markdown(f"""
+            - **序号**: `{latest.get('sequence', 'N/A')}`
+            - **延迟**: `{latest.get('delay_ms', 0):.1f} ms`
+            - **接收时间**: `{format_beijing_time(latest.get('receive_time'))}`
+            - **发送时间**: `{format_beijing_time(latest.get('send_time'))}`
+            - **当前北京时间**: `{current_beijing.strftime('%Y-%m-%d %H:%M:%S')}`
+            - **时间差**: `{(current_beijing - latest.get('receive_time', current_beijing)).total_seconds():.1f}秒前`
+            """)
+            
+            # 延迟状态指示器
+            delay = latest.get('delay_ms', 0)
+            if delay < 200:
+                st.success("✅ 延迟状态: 优秀 (<200ms)")
+            elif delay < 400:
+                st.warning("⚠️ 延迟状态: 良好 (200-400ms)")
+            else:
+                st.error("🔴 延迟状态: 较差 (>400ms)")
+        except Exception as e:
+            st.error(f"显示最新心跳信息时出错: {str(e)}")
     else:
         st.info("等待接收心跳数据...")
 
 with col2:
-    st.subheader("最近超时事件（北京时间）")
-    if simulator.timeout_events:
-        current_beijing = simulator.get_beijing_time()
-        timeout_df = pd.DataFrame([
-            {
-                "超时时间": e['time'].strftime('%H:%M:%S'),
-                "持续时长": f"{e['duration']:.1f}秒",
-                "距离现在": f"{(current_beijing - e['time']).total_seconds():.0f}秒前"
-            }
-            for e in list(simulator.timeout_events)[-5:]  # 显示最近5条
-        ])
-        st.dataframe(timeout_df, use_container_width=True)
-        
-        # 超时警告指示器
-        recent_timeout = [e for e in simulator.timeout_events 
-                         if (simulator.get_beijing_time() - e['time']).total_seconds() < 10]
-        if recent_timeout:
-            st.markdown('<p class="warning-text">⚠️ 最近10秒内有超时发生！</p>', 
-                       unsafe_allow_html=True)
+    st.subheader("⚠️ 最近超时事件（北京时间）")
+    if simulator.timeout_events and len(simulator.timeout_events) > 0:
+        try:
+            current_beijing = simulator.get_beijing_time()
+            timeout_data = []
+            for e in list(simulator.timeout_events)[-5:]:
+                if e and isinstance(e, dict):
+                    timeout_data.append({
+                        "超时时间": e.get('time', current_beijing).strftime('%H:%M:%S') if e.get('time') else 'N/A',
+                        "持续时长": f"{e.get('duration', 0):.1f}秒",
+                        "距离现在": f"{(current_beijing - e.get('time', current_beijing)).total_seconds():.0f}秒前" if e.get('time') else 'N/A'
+                    })
+            
+            if timeout_data:
+                timeout_df = pd.DataFrame(timeout_data)
+                st.dataframe(timeout_df, use_container_width=True)
+                
+                # 超时警告指示器
+                recent_timeout = False
+                for e in simulator.timeout_events:
+                    if e and isinstance(e, dict) and 'time' in e:
+                        if (simulator.get_beijing_time() - e['time']).total_seconds() < 10:
+                            recent_timeout = True
+                            break
+                if recent_timeout:
+                    st.markdown('<p class="warning-text">⚠️ 最近10秒内有超时发生！</p>', 
+                               unsafe_allow_html=True)
+            else:
+                st.info("无超时事件数据")
+        except Exception as e:
+            st.error(f"显示超时事件时出错: {str(e)}")
     else:
         st.success("✅ 无超时事件")
 
@@ -478,46 +525,51 @@ with col2:
 # 12. 传输统计图表（横坐标为北京时间）
 # --------------------------
 st.subheader("📊 传输统计（北京时间）")
-if simulator.heartbeat_history:
-    # 准备数据
-   if simulator.heartbeat_history:
-    delays = [
-        r['delay_ms'] 
-        for r in simulator.heartbeat_history[-50:] 
-        if isinstance(r, dict) and 'delay_ms' in r
-    ]
-else:
-    delays = []
-    sequences = [r['sequence'] for r in simulator.heartbeat_history[-50:]]
-    receive_times = [r['receive_time'] for r in simulator.heartbeat_history[-50:]]
-    
-    fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-    
-    # 延迟分布直方图
-    ax1.hist(delays, bins=20, color='skyblue', edgecolor='black', alpha=0.7)
-    ax1.axvline(x=400, color='red', linestyle='--', label='阈值线(400ms)')
-    ax1.set_xlabel('延迟 (ms)')
-    ax1.set_ylabel('频次')
-    ax1.set_title('延迟分布直方图')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # 延迟时间序列图（横坐标为北京时间）
-    ax2.plot(receive_times, delays, 'b-', linewidth=2, alpha=0.7)
-    ax2.scatter(receive_times, delays, c='red', s=30, alpha=0.5)
-    ax2.set_xlabel('接收时间（北京时间）', fontsize=10, fontweight='bold')
-    ax2.set_ylabel('延迟 (ms)', fontsize=10, fontweight='bold')
-    ax2.set_title('延迟变化趋势（最近50个）', fontsize=12, fontweight='bold')
-    ax2.grid(True, alpha=0.3)
-    
-    # 设置x轴为时间格式
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-    ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
-    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
-    
-    plt.tight_layout()
-    st.pyplot(fig2)
-    plt.close(fig2)
+if simulator.heartbeat_history and len(simulator.heartbeat_history) > 0:
+    try:
+        # 准备数据
+        delays = []
+        sequences = []
+        receive_times = []
+        
+        for r in list(simulator.heartbeat_history)[-50:]:
+            if r and isinstance(r, dict):
+                delays.append(r.get('delay_ms', 0))
+                sequences.append(r.get('sequence', 0))
+                receive_times.append(r.get('receive_time', datetime.datetime.now(BEIJING_TZ)))
+        
+        if delays and len(delays) > 0:
+            fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+            
+            # 延迟分布直方图
+            ax1.hist(delays, bins=20, color='skyblue', edgecolor='black', alpha=0.7)
+            ax1.axvline(x=400, color='red', linestyle='--', label='阈值线(400ms)')
+            ax1.set_xlabel('延迟 (ms)')
+            ax1.set_ylabel('频次')
+            ax1.set_title('延迟分布直方图')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            
+            # 延迟时间序列图（横坐标为北京时间）
+            ax2.plot(receive_times, delays, 'b-', linewidth=2, alpha=0.7)
+            ax2.scatter(receive_times, delays, c='red', s=30, alpha=0.5)
+            ax2.set_xlabel('接收时间（北京时间）', fontsize=10, fontweight='bold')
+            ax2.set_ylabel('延迟 (ms)', fontsize=10, fontweight='bold')
+            ax2.set_title('延迟变化趋势（最近50个）', fontsize=12, fontweight='bold')
+            ax2.grid(True, alpha=0.3)
+            
+            # 设置x轴为时间格式
+            ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
+            plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            
+            plt.tight_layout()
+            st.pyplot(fig2)
+            plt.close(fig2)
+        else:
+            st.info("等待足够数据进行统计图表展示...")
+    except Exception as e:
+        st.error(f"统计图表显示错误: {str(e)}")
 else:
     st.info("等待足够数据进行统计图表展示...")
 
@@ -558,36 +610,9 @@ with st.expander("📖 详细使用说明"):
     - **超时检测**: 3秒未收到心跳自动报警
     - **丢包统计**: 自动统计丢包率和丢失数量
     
-    #### 4. 可视化图表
-    - **延迟监控图**: 显示心跳延迟随时间变化趋势（北京时间）
-    - **序号接收图**: 显示心跳序号随时间接收情况（北京时间）
-    - **延迟分布图**: 统计延迟的分布情况
-    - **趋势分析图**: 显示最近50个心跳的延迟随时间变化
-    
-    #### 5. 时间显示
-    - **系统时间**: 实时显示当前北京时间
-    - **接收时间**: 每个心跳包的接收时间（北京时间）
-    - **发送时间**: 每个心跳包的发送时间（北京时间）
-    - **时间差**: 显示最新心跳距离当前时间
-    - **超时时间**: 记录每次超时发生的具体北京时间
-    
-    #### 6. 操作指南
+    #### 4. 操作指南
     1. 点击 **「开始监控」** 启动心跳模拟和监控
     2. 调整 **「刷新频率」** 控制图表更新速度
-    3. 开启 **「自动滚动」** 自动显示最新数据
-    4. 点击 **「停止监控」** 暂停数据采集
-    5. 点击 **「重置数据」** 清空所有历史数据
-    
-    #### 7. 指标说明
-    - **成功接收**: 成功接收的心跳包总数
-    - **超时事件**: 发生超时的总次数
-    - **平均延迟**: 所有成功接收心跳的平均延迟
-    - **丢包率**: 丢失数据包占总发送量的百分比
-    - **运行时长**: 系统持续运行的时间
-    
-    #### 8. 颜色标识
-    - 🟢 **绿色**: 延迟优秀（<200ms）
-    - 🟡 **黄色**: 延迟良好（200-400ms）
-    - 🔴 **红色**: 延迟较差（>400ms）
-    - ⚠️ **闪烁警告**: 最近10秒内有超时发生
+    3. 点击 **「停止监控」** 暂停数据采集
+    4. 点击 **「重置数据」** 清空所有历史数据
     """)
