@@ -3,4 +3,5 @@ matplotlib>=3.7.0
 numpy>=1.24.0
 pandas>=2.0.0
 pytz>=2023.3
-pydeck>=0.8.0
+folium>=0.14.0
+streamlit-folium>=0.14.0
