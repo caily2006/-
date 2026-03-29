@@ -404,3 +404,9 @@ with st.expander("📖 使用说明"):
     2. 点击「开始监控」启动心跳模拟
     3. 添加标记点查看高德卫星图
     """) 
+    # ... 原有代码（图表、地图、使用说明等） ...
+
+# 自动刷新页面（实现持续监控）
+if st.session_state.running:
+    time.sleep(refresh_rate)          # refresh_rate 从侧边栏获取（例如 1,2,3,5 秒）
+    st.rerun()
