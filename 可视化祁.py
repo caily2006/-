@@ -14,7 +14,7 @@ from streamlit_folium import st_folium
 
 # ==================== 配置 ====================
 # 请填入你申请的高德 Web 端 Key
-AMAP_KEY = "你的高德Key"   # <--- 在这里填写
+AMAP_KEY = "0c475e7a50516001883c104383b43f31"   # <--- 在这里填写
 
 # 设置北京时区
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
