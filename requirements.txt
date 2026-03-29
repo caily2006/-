@@ -1,6 +1,7 @@
-streamlit>=1.28.0
-matplotlib>=3.7.0
-numpy>=1.24.0
+# 核心依赖（锁定稳定版，避免前端报错）
+streamlit==1.28.1
+# 常用数据依赖（按需保留/删除）
 pandas>=2.0.0
-pytz>=2023.3
-pydeck==0.7.1
+numpy>=1.24.0
+matplotlib>=3.7.0
+plotly>=5.15.0
