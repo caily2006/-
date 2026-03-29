@@ -2,3 +2,9 @@ streamlit
 matplotlib
 pandas  # 如果你用到了数据处理，请加上
 numpy   # 如果你用到了数值计算，请加上
+streamlit>=1.28.0
+matplotlib>=3.7.0
+numpy>=1.24.0
+pandas>=2.0.0
+pytz>=2023.3
+pydeck==0.7.1
