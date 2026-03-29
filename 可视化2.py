@@ -12,7 +12,6 @@ import pytz
 import folium
 from streamlit_folium import st_folium
 import plotly.graph_objects as go
-import json
 
 # --------------------------
 # 设置北京时区
@@ -106,7 +105,7 @@ class DroneHeartbeatSimulator:
         }
 
 # --------------------------
-# 2. 心跳监控页面图表绘制
+# 2. 心跳监控图表绘制
 # --------------------------
 def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, timeout_events):
     plt.style.use('seaborn-v0_8-darkgrid')
@@ -115,7 +114,7 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
         ax1.plot(receive_times, delays, 'b-o', markersize=6, linewidth=2)
         ax1.set_xlabel('接收时间（北京时间）', fontsize=12)
         ax1.set_ylabel('延迟 (ms)', fontsize=12)
-        ax1.set_title('实时心跳延迟监控', fontsize=14)
+        ax1.set_title('实时心跳延迟监控')
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
         plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
         avg_delay = sum(delays)/len(delays)
@@ -142,14 +141,13 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
     return fig
 
 # --------------------------
-# 3. 航线规划辅助函数
+# 3. 航线规划辅助函数（校园范围）
 # --------------------------
-# 南京科技职业学院校园范围（近似）
-CAMPUS_CENTER = [32.2180, 118.7175]  # 纬度, 经度
-# 默认A、B点（位于校园内）
+# 南京科技职业学院校园中心（约）
+CAMPUS_CENTER = [32.2180, 118.7175]   # 纬度, 经度
+# 默认航点（位于校园内）
 DEFAULT_A = [32.2185, 118.7175]
 DEFAULT_B = [32.2175, 118.7185]
-# 默认障碍物（示例）
 DEFAULT_OBSTACLES = [
     [32.2182, 118.7178],
     [32.2180, 118.7180],
@@ -157,16 +155,13 @@ DEFAULT_OBSTACLES = [
 ]
 
 def plot_3d_route(a_latlon, b_latlon, obstacles):
-    """使用plotly Mapbox绘制3D航线图（倾斜视角）"""
-    # 提取坐标
-    lats = [a_latlon[0], b_latlon[0]] + [o[0] for o in obstacles]
-    lons = [a_latlon[1], b_latlon[1]] + [o[1] for o in obstacles]
-    # 航线线（A->B）
+    """使用 plotly 绘制 3D 倾斜地图（Mapbox）"""
+    # 航线坐标
     line_lats = [a_latlon[0], b_latlon[0]]
     line_lons = [a_latlon[1], b_latlon[1]]
     
     fig = go.Figure()
-    # 添加航线
+    # 航线
     fig.add_trace(go.Scattermapbox(
         mode='lines+markers',
         lon=line_lons,
@@ -175,7 +170,7 @@ def plot_3d_route(a_latlon, b_latlon, obstacles):
         line={'width': 3, 'color': 'red'},
         name='规划航线'
     ))
-    # 添加障碍物
+    # 障碍物
     if obstacles:
         obs_lats = [o[0] for o in obstacles]
         obs_lons = [o[1] for o in obstacles]
@@ -183,10 +178,10 @@ def plot_3d_route(a_latlon, b_latlon, obstacles):
             mode='markers',
             lon=obs_lons,
             lat=obs_lats,
-            marker={'size': 12, 'color': 'orange', 'symbol': 'danger'},
+            marker={'size': 12, 'color': 'orange', 'symbol': 'circle'},
             name='障碍物'
         ))
-    # 添加A、B点标注
+    # A、B点
     fig.add_trace(go.Scattermapbox(
         mode='markers+text',
         lon=[a_latlon[1], b_latlon[1]],
@@ -197,13 +192,12 @@ def plot_3d_route(a_latlon, b_latlon, obstacles):
         name='航点'
     ))
     
-    # 设置地图样式和视角（3D效果通过pitch和bearing实现）
     fig.update_layout(
         mapbox={
-            'style': "open-street-map",  # 免费样式，无pitch？实测open-street-map支持pitch
+            'style': "open-street-map",      # 免费地图样式
             'center': {'lat': CAMPUS_CENTER[0], 'lon': CAMPUS_CENTER[1]},
             'zoom': 17,
-            'pitch': 60,      # 倾斜角度，产生3D感
+            'pitch': 60,                    # 倾斜角度，产生3D感
             'bearing': 0,
         },
         margin={'l':0, 'r':0, 't':30, 'b':0},
@@ -212,38 +206,33 @@ def plot_3d_route(a_latlon, b_latlon, obstacles):
     )
     return fig
 
-def plot_2d_map_for_obstacle_selection(obstacles):
-    """使用folium绘制2D地图，支持点击圈选障碍物，返回新添加的障碍物坐标"""
-    # 初始化地图
+def plot_2d_map_for_obstacle_selection(obstacles, a_point, b_point):
+    """使用 folium 绘制二维地图，支持点击添加障碍物"""
     m = folium.Map(location=CAMPUS_CENTER, zoom_start=17, tiles='OpenStreetMap')
-    # 绘制A、B点
-    folium.Marker(DEFAULT_A, popup='A点', icon=folium.Icon(color='green')).add_to(m)
-    folium.Marker(DEFAULT_B, popup='B点', icon=folium.Icon(color='red')).add_to(m)
+    # 标记 A、B
+    folium.Marker(a_point, popup='A点', icon=folium.Icon(color='green')).add_to(m)
+    folium.Marker(b_point, popup='B点', icon=folium.Icon(color='red')).add_to(m)
     # 绘制已有障碍物
     for obs in obstacles:
         folium.CircleMarker(obs, radius=6, color='orange', fill=True, popup='障碍物').add_to(m)
-    # 添加点击获取坐标的JS
+    # 添加点击获取经纬度功能
     m.add_child(folium.LatLngPopup())
     return m
 
 # --------------------------
-# 4. Streamlit 主界面
+# 4. 页面配置
 # --------------------------
 st.set_page_config(page_title="无人机综合管理系统", layout="wide", page_icon="🚁")
 
-# 侧边栏选择页面
+# 侧边栏页面选择
 page = st.sidebar.radio("功能导航", ["✈️ 飞行监控", "🗺️ 航线规划"])
 
-# 公共时间显示
-def display_beijing_time():
-    now_beijing = datetime.datetime.now(BEIJING_TZ)
-    st.sidebar.markdown(f"**🕐 北京时间**\n{now_beijing.strftime('%Y-%m-%d %H:%M:%S')}")
+# 公共：显示北京时间
+st.sidebar.markdown(f"**🕐 北京时间**\n{datetime.datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
 
-display_beijing_time()
-
-# --------------------------
+# ==========================
 # 页面1：飞行监控（心跳）
-# --------------------------
+# ==========================
 if page == "✈️ 飞行监控":
     st.title("🚁 无人机心跳实时监控系统")
     st.markdown("所有时间均为北京时间 (UTC+8)")
@@ -298,7 +287,7 @@ if page == "✈️ 飞行监控":
     st.pyplot(fig)
     plt.close(fig)
     
-    # 显示最新心跳详情
+    # 最新心跳详情
     if simulator.heartbeat_history:
         latest = simulator.heartbeat_history[-1]
         st.subheader("最新心跳详情")
@@ -308,20 +297,20 @@ if page == "✈️ 飞行监控":
         col2.write(f"发送时间: {latest['send_time'].strftime('%H:%M:%S')}")
         col2.write(f"接收时间: {latest['receive_time'].strftime('%H:%M:%S')}")
 
-# --------------------------
+# ==========================
 # 页面2：航线规划
-# --------------------------
+# ==========================
 elif page == "🗺️ 航线规划":
     st.title("🗺️ 无人机航线规划 (南京科技职业学院)")
-    st.markdown("设定A、B点（校园内），并在地图上圈选障碍物，系统自动生成3D航线图。")
+    st.markdown("设定A、B点（校园内），在地图上点击添加障碍物，系统自动生成3D航线图。")
     
-    # 初始化 session 中的障碍物列表
-    if "obstacles" not in st.session_state:
-        st.session_state.obstacles = DEFAULT_OBSTACLES.copy()
+    # 初始化 session 中的航点和障碍物
     if "a_point" not in st.session_state:
         st.session_state.a_point = DEFAULT_A.copy()
     if "b_point" not in st.session_state:
         st.session_state.b_point = DEFAULT_B.copy()
+    if "obstacles" not in st.session_state:
+        st.session_state.obstacles = DEFAULT_OBSTACLES.copy()
     
     # 侧边栏：手动输入A、B经纬度
     st.sidebar.subheader("航点设置 (校园范围内)")
@@ -329,7 +318,6 @@ elif page == "🗺️ 航线规划":
     a_lon = st.sidebar.number_input("A点经度", value=st.session_state.a_point[1], format="%.6f", step=0.0001)
     b_lat = st.sidebar.number_input("B点纬度", value=st.session_state.b_point[0], format="%.6f", step=0.0001)
     b_lon = st.sidebar.number_input("B点经度", value=st.session_state.b_point[1], format="%.6f", step=0.0001)
-    
     if st.sidebar.button("更新航点"):
         st.session_state.a_point = [a_lat, a_lon]
         st.session_state.b_point = [b_lat, b_lon]
@@ -337,40 +325,40 @@ elif page == "🗺️ 航线规划":
     
     # 障碍物管理
     st.sidebar.subheader("障碍物管理")
+    if st.sidebar.button("清空所有障碍物"):
+        st.session_state.obstacles = []
+        st.rerun()
+    if st.sidebar.button("重置默认障碍物"):
+        st.session_state.obstacles = DEFAULT_OBSTACLES.copy()
+        st.rerun()
+    
     # 显示当前障碍物列表
     if st.session_state.obstacles:
-        st.sidebar.write("当前障碍物坐标：")
+        st.sidebar.write("当前障碍物：")
         for i, obs in enumerate(st.session_state.obstacles):
             st.sidebar.text(f"{i+1}: ({obs[0]:.6f}, {obs[1]:.6f})")
     else:
         st.sidebar.info("暂无障碍物")
     
-    # 清空障碍物按钮
-    if st.sidebar.button("清空所有障碍物"):
-        st.session_state.obstacles = []
-        st.rerun()
+    # 2D地图用于圈选障碍物
+    st.subheader("📌 二维地图：点击地图添加障碍物（圈选）")
+    st.markdown("点击地图任意位置可将该点添加为障碍物（需位于校园范围内）。绿色为A点，红色为B点，橙色圆点为障碍物。")
     
-    # 重置为默认障碍物
-    if st.sidebar.button("重置默认障碍物"):
-        st.session_state.obstacles = DEFAULT_OBSTACLES.copy()
-        st.rerun()
+    # 生成 folium 地图
+    folium_map = plot_2d_map_for_obstacle_selection(
+        st.session_state.obstacles,
+        st.session_state.a_point,
+        st.session_state.b_point
+    )
+    # 显示地图并捕获点击
+    output = st_folium(folium_map, width=700, height=500)
     
-    # 2D地图用于圈选障碍物（点击地图添加障碍物）
-    st.subheader("📌 2D地图：点击地图添加障碍物（圈选）")
-    st.markdown("在地图上点击任意位置，将该点添加为障碍物。绿色图标为A点，红色为B点，橙色圆点为障碍物。")
-    
-    # 生成folium地图
-    m = plot_2d_map_for_obstacle_selection(st.session_state.obstacles)
-    # 显示地图并获取点击坐标
-    output = st_folium(m, width=700, height=500)
-    
-    # 处理点击事件
+    # 处理点击添加障碍物
     if output and output.get("last_clicked"):
         lat = output["last_clicked"]["lat"]
         lng = output["last_clicked"]["lng"]
-        # 检查是否在校园范围内（简单判断，避免误点过远）
-        if (CAMPUS_CENTER[0]-0.01 < lat < CAMPUS_CENTER[0]+0.01 and 
-            CAMPUS_CENTER[1]-0.01 < lng < CAMPUS_CENTER[1]+0.01):
+        # 校验校园范围（北纬32.216~32.220，东经118.715~118.720）
+        if (32.216 <= lat <= 32.220) and (118.715 <= lng <= 118.720):
             new_obs = [lat, lng]
             if new_obs not in st.session_state.obstacles:
                 st.session_state.obstacles.append(new_obs)
@@ -379,15 +367,15 @@ elif page == "🗺️ 航线规划":
         else:
             st.warning("点击位置超出校园范围，未添加")
     
-    # 显示3D航线规划图
-    st.subheader("🚁 3D航线规划结果（倾斜视角）")
+    # 3D 航线规划图
+    st.subheader("🚁 3D 航线规划结果（倾斜视角）")
     try:
         fig3d = plot_3d_route(st.session_state.a_point, st.session_state.b_point, st.session_state.obstacles)
         st.plotly_chart(fig3d, use_container_width=True)
     except Exception as e:
-        st.error(f"3D地图渲染失败，请检查网络或Mapbox配置。错误：{e}")
+        st.error(f"3D地图渲染失败：{e}")
     
-    # 显示航线信息
+    # 显示航点和障碍物表格
     st.subheader("航线信息")
     col1, col2 = st.columns(2)
     with col1:
@@ -406,12 +394,13 @@ elif page == "🗺️ 航线规划":
     else:
         st.info("暂无障碍物，航线为直线。")
     
-    # 提示说明
-    with st.expander("📖 使用说明"):
+    # 使用说明
+    with st.expander("📖 航线规划使用说明"):
         st.markdown("""
-        **航线规划功能**
-        - A、B点：可通过侧边栏输入经纬度，必须位于南京科技职业学院校园内（约北纬32.216~32.220，东经118.715~118.720）。
-        - 障碍物圈选：在2D地图上点击任意位置，系统自动添加为障碍物点。支持多次点击添加多个。
-        - 3D地图：使用Plotly Mapbox展示倾斜视角的航线及障碍物（免费样式为OpenStreetMap，无pitch限制）。
-        - 若3D地图无法显示，可能是网络问题或Plotly版本问题，请尝试刷新或更换网络环境。
+        **操作指南**
+        1. **航点设置**：在左侧边栏输入A、B点经纬度（必须位于南京科技职业学院校园内，北纬32.216~32.220，东经118.715~118.720）。
+        2. **添加障碍物**：在二维地图上直接点击任意位置，系统会自动添加为障碍物点（橙色圆点）。可多次点击添加多个障碍物。
+        3. **清空/重置障碍物**：使用侧边栏按钮。
+        4. **3D航线图**：自动展示A、B点之间的航线（红色线）以及所有障碍物（橙色点），地图为倾斜视角，可缩放旋转。
+        5. **校园范围**：默认点均在校内，若手动输入的经纬度过远，可能无法在地图上正常显示。
         """)
