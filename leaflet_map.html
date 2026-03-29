@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        #map { height: 100%; margin: 0; padding: 0; }
+        body, html { height: 100%; margin: 0; padding: 0; }
+    </style>
+</head>
+<body>
+    <div id="map" style="height: 500px; width: 100%;"></div>
+    <script>
+        function initMap(points) {
+            if (window.map) window.map.remove();
+
+            var centerLat = 39.9042;
+            var centerLon = 116.4074;
+            if (points && points.length > 0) {
+                var sumLat = points.reduce((sum, p) => sum + p.lat, 0);
+                var sumLon = points.reduce((sum, p) => sum + p.lon, 0);
+                centerLat = sumLat / points.length;
+                centerLon = sumLon / points.length;
+            }
+
+            window.map = L.map('map').setView([centerLat, centerLon], 10);
+            
+            // 高德卫星图瓦片（style=6 为带标注的卫星图）
+            L.tileLayer('https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}', {
+                attribution: '&copy; <a href="https://www.amap.com/">高德地图</a>',
+                maxZoom: 18,
+                minZoom: 1
+            }).addTo(window.map);
+
+            if (window.markerLayer) window.map.removeLayer(window.markerLayer);
+            window.markerLayer = L.layerGroup().addTo(window.map);
+
+            if (points) {
+                points.forEach(function(point) {
+                    var marker = L.marker([point.lat, point.lon]).bindPopup(
+                        `<b>${point.name}</b><br>纬度: ${point.lat}<br>经度: ${point.lon}`
+                    );
+                    window.markerLayer.addLayer(marker);
+                });
+            }
+        }
+
+        window.addEventListener('message', function(e) {
+            if (e.data.type === 'streamlit:setComponentValue') {
+                initMap(e.data.value);
+            }
+        });
+        window.parent.postMessage({ type: 'streamlit:componentReady' }, '*');
+    </script>
+</body>
+</html>
