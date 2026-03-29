@@ -124,7 +124,6 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
     
     if sequences and delays and receive_times and len(sequences) > 0:
         try:
-            # 延迟图表
             ax1.plot(receive_times, delays, 'b-o', markersize=6, linewidth=2)
             ax1.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
             ax1.set_ylabel('延迟', fontsize=12, fontweight='bold')
@@ -134,14 +133,12 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
             ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
             plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
             
-            # 阈值线和平均线
             avg_delay = sum(delays) / len(delays)
             ax1.axhline(y=avg_delay, color='r', linestyle='--', linewidth=2, label=f'平均延迟: {avg_delay:.1f}ms')
             ax1.axhline(y=400, color='orange', linestyle=':', linewidth=1.5, label='延迟阈值: 400ms', alpha=0.7)
             ax1.fill_between(receive_times, 400, delays, where=[d > 400 for d in delays], alpha=0.3, color='red')
             ax1.legend(loc='upper right')
 
-            # 序号图表
             ax2.plot(receive_times, sequences, 'g-o', markersize=6, linewidth=2)
             ax2.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
             ax2.set_ylabel('心跳序号', fontsize=12, fontweight='bold')
@@ -169,7 +166,6 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
 # ==================== 3. Streamlit 界面 ====================
 st.set_page_config(page_title="无人机心跳监控系统", layout="wide", page_icon="🚁")
 
-# 自定义CSS
 st.markdown("""
 <style>
     .time-display {
