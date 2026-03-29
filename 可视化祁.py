@@ -9,7 +9,8 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import pytz
-import pydeck as pdk
+import folium
+from streamlit_folium import st_folium
 
 # 设置北京时区
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
@@ -45,7 +46,6 @@ class DroneHeartbeatSimulator:
         
         # 模拟传输延迟（100-500毫秒），仅记录不实际等待
         delay_ms = random.uniform(100, 500)
-        # 注意：这里没有 time.sleep，避免阻塞
         
         receive_time = self.get_beijing_time()
         record = {
@@ -350,7 +350,7 @@ with st.sidebar:
     
     st.divider()
     
-    st.subheader("🗺️ 3D 地图控制面板")
+    st.subheader("🗺️ Leaflet 地图控制面板")
     with st.form("map_form"):
         lat = st.number_input("纬度 (Latitude)", value=39.9042, format="%.6f", help="例如北京：39.9042")
         lon = st.number_input("经度 (Longitude)", value=116.4074, format="%.6f", help="例如北京：116.4074")
@@ -532,49 +532,33 @@ else:
     st.info("等待足够数据进行统计图表展示...")
 
 # --------------------------
-# 13. 3D 地图显示（已修复）
+# 13. Leaflet 地图显示（替换 pydeck）
 # --------------------------
 st.markdown("---")
-st.subheader("🗺️ 3D 地图（标记点）")
+st.subheader("🗺️ Leaflet 地图（标记点）")
 
+# 确定地图中心：如果有标记点，则以它们的平均经纬度为中心；否则显示北京
 if len(st.session_state.map_points) > 0:
-    df_points = pd.DataFrame(st.session_state.map_points)
-    
-    layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=df_points,
-        get_position=["lon", "lat"],   # 注意顺序：经度在前，纬度在后
-        get_radius=2000,
-        get_fill_color=[255, 0, 0, 180],
-        get_line_color=[0, 0, 0, 100],
-        pickable=True,
-        auto_highlight=True,
-        radius_scale=1,
-    )
-    
-    tooltip = {"html": "<b>{name}</b><br/>纬度: {lat}<br/>经度: {lon}", "style": {"color": "white"}}
-    
-    center_lat = df_points["lat"].mean()
-    center_lon = df_points["lon"].mean()
-    
-    view_state = pdk.ViewState(
-        latitude=center_lat,
-        longitude=center_lon,
-        zoom=10,
-        pitch=50,
-        bearing=0,
-    )
-    
-    deck = pdk.Deck(
-        layers=[layer],
-        initial_view_state=view_state,
-        tooltip=tooltip,
-        map_style=None,   # ✅ 使用默认底图，无需 API Key
-    )
-    
-    st.pydeck_chart(deck, use_container_width=True)
+    center_lat = sum(p['lat'] for p in st.session_state.map_points) / len(st.session_state.map_points)
+    center_lon = sum(p['lon'] for p in st.session_state.map_points) / len(st.session_state.map_points)
 else:
-    st.info("💡 请在左侧边栏「地图控制面板」中添加标记点，地图将自动显示。")
+    center_lat, center_lon = 39.9042, 116.4074  # 北京天安门
+
+# 创建 Leaflet 地图
+m = folium.Map(location=[center_lat, center_lon], zoom_start=10, control_scale=True)
+
+# 添加所有标记点
+for point in st.session_state.map_points:
+    popup_text = f"<b>{point['name']}</b><br>纬度: {point['lat']}<br>经度: {point['lon']}"
+    folium.Marker(
+        location=[point['lat'], point['lon']],
+        popup=folium.Popup(popup_text, max_width=300),
+        tooltip=point['name'],
+        icon=folium.Icon(color='red', icon='info-sign')
+    ).add_to(m)
+
+# 显示地图（st_folium 返回交互信息，但我们暂时不需要捕获）
+st_folium(m, width=700, height=500, returned_objects=[])
 
 # --------------------------
 # 14. 使用说明
@@ -599,14 +583,15 @@ with st.expander("📖 详细使用说明"):
     - **丢包统计**: 自动统计丢包率和丢失数量
     
     #### 4. 地图功能
-    - 在左侧边栏「3D 地图控制面板」中输入经纬度坐标，点击「添加标记点」。
-    - 地图将自动以3D视角显示所有标记点，支持鼠标拖拽旋转、缩放。
-    - 可以随时清空所有标记点。
+    - **Leaflet 地图**：轻量级交互式地图，支持缩放、拖拽
+    - 在左侧边栏「Leaflet 地图控制面板」中输入经纬度坐标，点击「添加标记点」
+    - 地图自动以所有标记点的中心为视角，并显示每个标记点的弹窗信息
+    - 可以随时清空所有标记点
     
     #### 5. 操作指南
     1. 在左侧边栏点击 **「开始监控」** 启动心跳模拟和监控
     2. 调整 **「刷新频率」** 控制数据生成速度
     3. 点击 **「停止监控」** 暂停数据采集
     4. 点击 **「重置数据」** 清空所有历史数据
-    5. 在地图控制面板中添加经纬度标记点，查看3D地图
+    5. 在地图控制面板中添加经纬度标记点，查看 Leaflet 地图
     """)
