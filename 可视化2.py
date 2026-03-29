@@ -9,6 +9,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import pytz
+import pydeck as pdk
 
 # 设置北京时区
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
@@ -20,8 +21,8 @@ class DroneHeartbeatSimulator:
     def __init__(self, timeout_seconds=3):
         self.timeout_seconds = timeout_seconds
         self.sequence_number = 0
-        self.heartbeat_history = deque(maxlen=100)  # 存储最近100条心跳记录
-        self.timeout_events = deque(maxlen=20)  # 存储最近20条超时事件
+        self.heartbeat_history = deque(maxlen=100)
+        self.timeout_events = deque(maxlen=20)
         self.last_received_time = time.time()
         self.start_time = time.time()
         self.total_sent = 0
@@ -29,24 +30,22 @@ class DroneHeartbeatSimulator:
         self.last_timeout_time = 0
 
     def get_beijing_time(self):
-        """获取北京时间"""
         return datetime.datetime.now(BEIJING_TZ)
     
     def generate_heartbeat(self):
-        """生成单条心跳数据"""
+        """生成单条心跳数据（不阻塞）"""
         timestamp = self.get_beijing_time()
         self.total_sent += 1
         
         # 模拟10%丢包率
         if random.random() < 0.1:
             self.total_lost += 1
-            # 检查超时（即使丢包也要检查）
             self._check_timeout()
             return None
         
-        # 模拟传输延迟（100-500毫秒）
+        # 模拟传输延迟（100-500毫秒），仅记录不实际等待
         delay_ms = random.uniform(100, 500)
-        time.sleep(delay_ms / 1000)  # 按毫秒级延迟等待
+        # 注意：这里没有 time.sleep，避免阻塞
         
         receive_time = self.get_beijing_time()
         record = {
@@ -60,17 +59,12 @@ class DroneHeartbeatSimulator:
         self.heartbeat_history.append(record)
         self.last_received_time = time.time()
         self.sequence_number += 1
-        
-        # 检查超时
         self._check_timeout()
-        
         return record
     
     def _check_timeout(self):
-        """检查是否超时"""
         current_time = time.time()
         if current_time - self.last_received_time > self.timeout_seconds:
-            # 避免重复记录同一个超时事件
             if current_time - self.last_timeout_time > 1:
                 self.timeout_events.append({
                     'time': self.get_beijing_time(),
@@ -79,12 +73,10 @@ class DroneHeartbeatSimulator:
                 self.last_timeout_time = current_time
     
     def get_recent_data(self, window_size=30):
-        """获取最近的数据用于可视化"""
         sequences = []
         delays = []
         receive_times = []
         
-        # 安全地获取数据
         if not self.heartbeat_history:
             return sequences, delays, receive_times
         
@@ -94,7 +86,6 @@ class DroneHeartbeatSimulator:
                 delays.append(record.get('delay_ms', 0))
                 receive_times.append(record.get('receive_time', datetime.datetime.now(BEIJING_TZ)))
         
-        # 只返回最近的数据
         if len(sequences) > window_size:
             sequences = sequences[-window_size:]
             delays = delays[-window_size:]
@@ -103,7 +94,6 @@ class DroneHeartbeatSimulator:
         return sequences, delays, receive_times
     
     def get_statistics(self):
-        """获取统计信息"""
         if not self.heartbeat_history or len(self.heartbeat_history) == 0:
             return {
                 'avg_delay': 0,
@@ -138,10 +128,9 @@ class DroneHeartbeatSimulator:
         }
 
 # --------------------------
-# 2. 时间显示函数（北京时间）
+# 2. 时间显示函数
 # --------------------------
 def get_beijing_time_info():
-    """获取北京时间信息"""
     now = datetime.datetime.now(BEIJING_TZ)
     return {
         'datetime': now,
@@ -152,7 +141,6 @@ def get_beijing_time_info():
     }
 
 def format_beijing_time(dt):
-    """格式化北京时间"""
     if dt is None:
         return "N/A"
     if dt.tzinfo is None:
@@ -160,17 +148,14 @@ def format_beijing_time(dt):
     return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 # --------------------------
-# 3. 图表绘制函数（横坐标为北京时间）
+# 3. 图表绘制函数
 # --------------------------
 def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, timeout_events):
-    """创建心跳监控图表，横坐标为北京时间"""
     plt.style.use('seaborn-v0_8-darkgrid')
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
     
-    # 检查是否有有效数据
     if sequences and delays and receive_times and len(sequences) > 0:
         try:
-            # ========== 子图1：延迟监控（横坐标为时间） ==========
             ax1.plot(receive_times, delays, 'b-o', markersize=6, linewidth=2, 
                     markeredgecolor='darkblue', markeredgewidth=1)
             ax1.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
@@ -178,32 +163,25 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
             ax1.set_title('实时心跳延迟监控（按北京时间）', fontsize=14, fontweight='bold')
             ax1.grid(True, alpha=0.3, linestyle='--')
             
-            # 设置x轴为时间格式
             ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
             ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
             plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
-            
-            # 自动调整x轴范围
             ax1.autoscale_view()
             
-            # 添加平均延迟线
             if delays:
                 avg_delay = sum(delays) / len(delays)
                 ax1.axhline(y=avg_delay, color='r', linestyle='--', linewidth=2,
                            label=f'平均延迟: {avg_delay:.1f}ms')
                 ax1.legend(loc='upper right', fontsize=10)
             
-            # 添加延迟阈值线
             ax1.axhline(y=400, color='orange', linestyle=':', linewidth=1.5,
                        label='延迟阈值: 400ms', alpha=0.7)
             
-            # 填充超出阈值的区域
             threshold = 400
             above_threshold = [d if d > threshold else threshold for d in delays]
             ax1.fill_between(receive_times, threshold, above_threshold, 
                             alpha=0.3, color='red', label='超出阈值')
             
-            # ========== 子图2：序号接收情况（横坐标为时间） ==========
             ax2.plot(receive_times, sequences, 'g-o', markersize=6, linewidth=2,
                     markeredgecolor='darkgreen', markeredgewidth=1)
             ax2.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
@@ -212,19 +190,13 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
                          fontsize=14, fontweight='bold')
             ax2.grid(True, alpha=0.3, linestyle='--')
             
-            # 设置x轴为时间格式
             ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
             ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
             plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
-            
-            # 设置y轴为整数刻度
             ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
             ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
-            
-            # 自动调整x轴范围
             ax2.autoscale_view()
             
-            # 显示超时警告
             if timeout_events and len(timeout_events) > 0:
                 now_beijing = datetime.datetime.now(BEIJING_TZ)
                 recent_timeouts = []
@@ -238,11 +210,9 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
                             verticalalignment='top', fontweight='bold',
                             bbox=dict(boxstyle='round', facecolor='red', alpha=0.3))
         except Exception as e:
-            # 如果绘图出错，显示错误信息
             ax1.text(0.5, 0.5, f'绘图错误: {str(e)}', ha='center', va='center', fontsize=12)
             ax2.text(0.5, 0.5, '请检查数据', ha='center', va='center', fontsize=12)
     else:
-        # 无数据时显示提示
         ax1.text(0.5, 0.5, '等待数据...', ha='center', va='center', fontsize=14)
         ax2.text(0.5, 0.5, '等待数据...', ha='center', va='center', fontsize=14)
         ax1.set_xlim(0, 10)
@@ -321,14 +291,15 @@ if "last_update" not in st.session_state:
     st.session_state.last_update = time.time()
 if "update_counter" not in st.session_state:
     st.session_state.update_counter = 0
+if "map_points" not in st.session_state:
+    st.session_state.map_points = []
 
 # --------------------------
-# 6. 标题和实时时间显示（北京时间）
+# 6. 标题和实时时间显示
 # --------------------------
 st.title("🚁 无人机心跳实时可视化监控系统")
 st.markdown('<span class="beijing-badge">🇨🇳 北京时间 (UTC+8)</span>', unsafe_allow_html=True)
 
-# 实时时间显示区域
 current_time_info = get_beijing_time_info()
 st.markdown(f"""
 <div class="time-display">
@@ -340,53 +311,74 @@ st.markdown(f"""
 st.markdown("实时监控无人机心跳数据，包含延迟分析和超时检测 | 所有时间均为北京时间")
 
 # --------------------------
-# 7. 控制面板
+# 7. 左侧边栏控制面板
 # --------------------------
-col1, col2, col3, col4, col5 = st.columns(5)
-
-with col1:
-    if st.button("▶ 开始监控", use_container_width=True, type="primary"):
-        st.session_state.running = True
-        st.rerun()
-
-with col2:
-    if st.button("⏸ 停止监控", use_container_width=True):
-        st.session_state.running = False
-        st.rerun()
-
-with col3:
-    if st.button("🔄 重置数据", use_container_width=True):
-        st.session_state.simulator = DroneHeartbeatSimulator(timeout_seconds=3)
-        st.session_state.running = False
-        st.rerun()
-
-with col4:
-    refresh_rate = st.selectbox("刷新频率", [1, 2, 3, 5], index=0, 
-                                 help="图表刷新间隔（秒）")
-
-with col5:
+with st.sidebar:
+    st.header("⚙️ 控制面板")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("▶ 开始监控", use_container_width=True, type="primary"):
+            st.session_state.running = True
+    with col2:
+        if st.button("⏸ 停止监控", use_container_width=True):
+            st.session_state.running = False
+    with col3:
+        if st.button("🔄 重置数据", use_container_width=True):
+            st.session_state.simulator = DroneHeartbeatSimulator(timeout_seconds=3)
+            st.session_state.running = False
+            st.session_state.last_update = time.time()
+    
+    st.divider()
+    
+    st.subheader("📊 显示设置")
+    refresh_rate = st.selectbox("刷新频率（秒）", [1, 2, 3, 5], index=0, 
+                                 help="图表刷新间隔（仅影响自动数据生成间隔）")
     auto_scroll = st.checkbox("自动滚动", value=True, help="自动显示最新数据")
-
-st.markdown("---")
+    
+    st.divider()
+    
+    st.subheader("📈 实时统计")
+    sim = st.session_state.simulator
+    stats = sim.get_statistics()
+    st.metric("成功接收", stats['received_count'])
+    st.metric("超时事件", len(sim.timeout_events))
+    st.metric("平均延迟", f"{stats['avg_delay']:.1f} ms")
+    st.metric("丢包率", f"{stats['packet_loss_rate']:.1f}%")
+    runtime = time.time() - sim.start_time
+    st.metric("运行时长", f"{int(runtime // 60)}分{int(runtime % 60)}秒")
+    
+    st.divider()
+    
+    st.subheader("🗺️ 3D 地图控制面板")
+    with st.form("map_form"):
+        lat = st.number_input("纬度 (Latitude)", value=39.9042, format="%.6f", help="例如北京：39.9042")
+        lon = st.number_input("经度 (Longitude)", value=116.4074, format="%.6f", help="例如北京：116.4074")
+        point_name = st.text_input("标记名称（可选）", placeholder="例如：无人机位置")
+        submitted = st.form_submit_button("➕ 添加标记点")
+        if submitted:
+            new_point = {"lat": lat, "lon": lon, "name": point_name if point_name else f"点{len(st.session_state.map_points)+1}"}
+            st.session_state.map_points.append(new_point)
+            st.success(f"已添加标记: {new_point['name']} ({lat}, {lon})")
+    
+    if st.button("🗑️ 清空所有标记", use_container_width=True):
+        st.session_state.map_points = []
+    
+    if len(st.session_state.map_points) > 0:
+        st.info(f"当前共有 {len(st.session_state.map_points)} 个标记点")
 
 # --------------------------
-# 8. 实时数据生成
+# 8. 自动数据生成（利用 Streamlit 的自动重运行机制）
 # --------------------------
 if st.session_state.running:
     current_time = time.time()
-    
-    # 根据刷新率控制心跳生成速度
-    time_since_update = current_time - st.session_state.last_update
-    
-    if time_since_update >= 1:  # 每秒生成一次心跳
+    # 根据 refresh_rate 控制生成间隔
+    if current_time - st.session_state.last_update >= refresh_rate:
         simulator = st.session_state.simulator
-        
-        # 生成新心跳
         record = simulator.generate_heartbeat()
         st.session_state.last_update = current_time
         st.session_state.update_counter += 1
         
-        # 显示实时通知
         current_beijing_time = simulator.get_beijing_time()
         if record:
             st.toast(f"✅ 心跳 #{record['sequence']} | 延迟: {record['delay_ms']:.1f}ms | 北京时间: {record['receive_time'].strftime('%H:%M:%S')}", icon="✅")
@@ -399,61 +391,42 @@ if st.session_state.running:
 simulator = st.session_state.simulator
 stats = simulator.get_statistics()
 
-# 创建指标行
 col1, col2, col3, col4, col5 = st.columns(5)
-
 with col1:
-    st.metric("📊 成功接收", stats['received_count'], 
-              delta=None, help="成功接收的心跳包总数")
-
+    st.metric("📊 成功接收", stats['received_count'], help="成功接收的心跳包总数")
 with col2:
     timeout_count = len(simulator.timeout_events) if simulator.timeout_events else 0
-    st.metric("⚠️ 超时事件", timeout_count, 
-              delta=None, help="超时警告总次数")
-
+    st.metric("⚠️ 超时事件", timeout_count, help="超时警告总次数")
 with col3:
     st.metric("⏱️ 平均延迟", f"{stats['avg_delay']:.1f} ms",
               delta=f"{stats['min_delay']:.0f}-{stats['max_delay']:.0f}ms",
               help="平均延迟及范围")
-
 with col4:
     loss_rate = stats['packet_loss_rate']
-    st.metric("📉 丢包率", f"{loss_rate:.1f}%",
-              delta=None, help="数据包丢失率")
-
+    st.metric("📉 丢包率", f"{loss_rate:.1f}%", help="数据包丢失率")
 with col5:
     runtime = time.time() - simulator.start_time
-    st.metric("⏰ 运行时长", f"{int(runtime // 60)}分{int(runtime % 60)}秒",
-              help="系统运行总时长")
+    st.metric("⏰ 运行时长", f"{int(runtime // 60)}分{int(runtime % 60)}秒", help="系统运行总时长")
 
 st.markdown("---")
 
 # --------------------------
-# 10. 实时图表显示（横坐标为北京时间）
+# 10. 实时图表显示
 # --------------------------
-# 创建图表容器
-chart_container = st.container()
-
-with chart_container:
-    try:
-        # 获取最新数据（包含接收时间）
-        sequences, delays, receive_times = simulator.get_recent_data(window_size=30)
-        
-        # 创建并显示图表
-        fig = create_heartbeat_charts(
-            sequences, 
-            delays, 
-            receive_times,
-            len(simulator.timeout_events) if simulator.timeout_events else 0,
-            simulator.timeout_events if simulator.timeout_events else []
-        )
-        st.pyplot(fig)
-        plt.close(fig)
-    except Exception as e:
-        st.error(f"图表显示错误: {str(e)}")
+try:
+    sequences, delays, receive_times = simulator.get_recent_data(window_size=30)
+    fig = create_heartbeat_charts(
+        sequences, delays, receive_times,
+        len(simulator.timeout_events) if simulator.timeout_events else 0,
+        simulator.timeout_events if simulator.timeout_events else []
+    )
+    st.pyplot(fig)
+    plt.close(fig)
+except Exception as e:
+    st.error(f"图表显示错误: {str(e)}")
 
 # --------------------------
-# 11. 实时状态面板（北京时间）
+# 11. 实时状态面板
 # --------------------------
 col1, col2 = st.columns(2)
 
@@ -463,7 +436,6 @@ with col1:
         try:
             latest = simulator.heartbeat_history[-1]
             current_beijing = simulator.get_beijing_time()
-            
             st.markdown(f"""
             - **序号**: `{latest.get('sequence', 'N/A')}`
             - **延迟**: `{latest.get('delay_ms', 0):.1f} ms`
@@ -472,8 +444,6 @@ with col1:
             - **当前北京时间**: `{current_beijing.strftime('%Y-%m-%d %H:%M:%S')}`
             - **时间差**: `{(current_beijing - latest.get('receive_time', current_beijing)).total_seconds():.1f}秒前`
             """)
-            
-            # 延迟状态指示器
             delay = latest.get('delay_ms', 0)
             if delay < 200:
                 st.success("✅ 延迟状态: 优秀 (<200ms)")
@@ -499,12 +469,9 @@ with col2:
                         "持续时长": f"{e.get('duration', 0):.1f}秒",
                         "距离现在": f"{(current_beijing - e.get('time', current_beijing)).total_seconds():.0f}秒前" if e.get('time') else 'N/A'
                     })
-            
             if timeout_data:
                 timeout_df = pd.DataFrame(timeout_data)
                 st.dataframe(timeout_df, use_container_width=True)
-                
-                # 超时警告指示器
                 recent_timeout = False
                 for e in simulator.timeout_events:
                     if e and isinstance(e, dict) and 'time' in e:
@@ -512,8 +479,7 @@ with col2:
                             recent_timeout = True
                             break
                 if recent_timeout:
-                    st.markdown('<p class="warning-text">⚠️ 最近10秒内有超时发生！</p>', 
-                               unsafe_allow_html=True)
+                    st.markdown('<p class="warning-text">⚠️ 最近10秒内有超时发生！</p>', unsafe_allow_html=True)
             else:
                 st.info("无超时事件数据")
         except Exception as e:
@@ -522,26 +488,21 @@ with col2:
         st.success("✅ 无超时事件")
 
 # --------------------------
-# 12. 传输统计图表（横坐标为北京时间）
+# 12. 传输统计图表
 # --------------------------
 st.subheader("📊 传输统计（北京时间）")
 if simulator.heartbeat_history and len(simulator.heartbeat_history) > 0:
     try:
-        # 准备数据
         delays = []
         sequences = []
         receive_times = []
-        
         for r in list(simulator.heartbeat_history)[-50:]:
             if r and isinstance(r, dict):
                 delays.append(r.get('delay_ms', 0))
                 sequences.append(r.get('sequence', 0))
                 receive_times.append(r.get('receive_time', datetime.datetime.now(BEIJING_TZ)))
-        
         if delays and len(delays) > 0:
             fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-            
-            # 延迟分布直方图
             ax1.hist(delays, bins=20, color='skyblue', edgecolor='black', alpha=0.7)
             ax1.axvline(x=400, color='red', linestyle='--', label='阈值线(400ms)')
             ax1.set_xlabel('延迟 (ms)')
@@ -550,15 +511,12 @@ if simulator.heartbeat_history and len(simulator.heartbeat_history) > 0:
             ax1.legend()
             ax1.grid(True, alpha=0.3)
             
-            # 延迟时间序列图（横坐标为北京时间）
             ax2.plot(receive_times, delays, 'b-', linewidth=2, alpha=0.7)
             ax2.scatter(receive_times, delays, c='red', s=30, alpha=0.5)
             ax2.set_xlabel('接收时间（北京时间）', fontsize=10, fontweight='bold')
             ax2.set_ylabel('延迟 (ms)', fontsize=10, fontweight='bold')
             ax2.set_title('延迟变化趋势（最近50个）', fontsize=12, fontweight='bold')
             ax2.grid(True, alpha=0.3)
-            
-            # 设置x轴为时间格式
             ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
             ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
             plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
@@ -574,19 +532,49 @@ else:
     st.info("等待足够数据进行统计图表展示...")
 
 # --------------------------
-# 13. 自动刷新机制
+# 13. 3D 地图显示（已修复）
 # --------------------------
-if st.session_state.running:
-    # 添加进度条显示下次刷新时间
-    progress_placeholder = st.empty()
-    for i in range(refresh_rate, 0, -1):
-        progress_placeholder.progress((refresh_rate - i) / refresh_rate, 
-                                      text=f"下次刷新倒计时: {i}秒")
-        time.sleep(1)
-    progress_placeholder.empty()
+st.markdown("---")
+st.subheader("🗺️ 3D 地图（标记点）")
+
+if len(st.session_state.map_points) > 0:
+    df_points = pd.DataFrame(st.session_state.map_points)
     
-    # 刷新页面
-    st.rerun()
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=df_points,
+        get_position=["lon", "lat"],   # 注意顺序：经度在前，纬度在后
+        get_radius=2000,
+        get_fill_color=[255, 0, 0, 180],
+        get_line_color=[0, 0, 0, 100],
+        pickable=True,
+        auto_highlight=True,
+        radius_scale=1,
+    )
+    
+    tooltip = {"html": "<b>{name}</b><br/>纬度: {lat}<br/>经度: {lon}", "style": {"color": "white"}}
+    
+    center_lat = df_points["lat"].mean()
+    center_lon = df_points["lon"].mean()
+    
+    view_state = pdk.ViewState(
+        latitude=center_lat,
+        longitude=center_lon,
+        zoom=10,
+        pitch=50,
+        bearing=0,
+    )
+    
+    deck = pdk.Deck(
+        layers=[layer],
+        initial_view_state=view_state,
+        tooltip=tooltip,
+        map_style=None,   # ✅ 使用默认底图，无需 API Key
+    )
+    
+    st.pydeck_chart(deck, use_container_width=True)
+else:
+    st.info("💡 请在左侧边栏「地图控制面板」中添加标记点，地图将自动显示。")
 
 # --------------------------
 # 14. 使用说明
@@ -601,18 +589,24 @@ with st.expander("📖 详细使用说明"):
     - **时间显示**: 所有图表和数据显示均为北京时间
     
     #### 2. 心跳模拟
-    - **发送频率**: 每秒自动发送一次心跳包
+    - **发送频率**: 根据「刷新频率」自动生成（默认每秒一次）
     - **数据包内容**: 包含序号、北京时间戳等信息
-    - **网络模拟**: 10% 随机丢包率，100-500ms 随机延迟
+    - **网络模拟**: 10% 随机丢包率，100-500ms 随机延迟（模拟，不阻塞界面）
     
     #### 3. 实时监控
     - **延迟监控**: 实时显示每个心跳的延迟时间（横坐标为北京时间）
     - **超时检测**: 3秒未收到心跳自动报警
     - **丢包统计**: 自动统计丢包率和丢失数量
     
-    #### 4. 操作指南
-    1. 点击 **「开始监控」** 启动心跳模拟和监控
-    2. 调整 **「刷新频率」** 控制图表更新速度
+    #### 4. 地图功能
+    - 在左侧边栏「3D 地图控制面板」中输入经纬度坐标，点击「添加标记点」。
+    - 地图将自动以3D视角显示所有标记点，支持鼠标拖拽旋转、缩放。
+    - 可以随时清空所有标记点。
+    
+    #### 5. 操作指南
+    1. 在左侧边栏点击 **「开始监控」** 启动心跳模拟和监控
+    2. 调整 **「刷新频率」** 控制数据生成速度
     3. 点击 **「停止监控」** 暂停数据采集
     4. 点击 **「重置数据」** 清空所有历史数据
+    5. 在地图控制面板中添加经纬度标记点，查看3D地图
     """)
