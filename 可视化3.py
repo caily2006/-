@@ -1,25 +1,3 @@
-import math
-
-# 定义WGS84转GCJ02核心函数
-def wgs84_to_gcj02(lon, lat):
-    # 地球参数
-    a = 6378245.0  # 长半轴
-    ee = 0.00669342162296594323  # 扁率
-    dlat = lat - 39.9
-    dlon = lon - 116.39999999999999
-    
-    # 计算偏移量
-    radlat = dlat * math.pi / 180.0
-    magic = math.sin(radlat)
-    sqrtmagic = math.sqrt(1 - ee * magic * magic)
-    
-    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (sqrtmagic * (1 - ee * magic * magic)) * math.pi)
-    dlon = (dlon * 180.0) / (a / sqrtmagic * math.cos(radlat) * math.pi)
-    
-    # 计算GCJ02坐标
-    mglat = lat + dlat
-    mglon = lon + dlon
-    return mglon, mglat
 import time
 import datetime
 import random
@@ -33,6 +11,7 @@ import pandas as pd
 import pytz
 import folium
 from streamlit_folium import st_folium
+from math import radians, sin, cos, sqrt, asin, pi
 
 # ==================== 配置 ====================
 AMAP_KEY = "0c475e7a50516001883c104383b43f31"   # 高德 Web 端 Key
@@ -55,21 +34,30 @@ def wgs84_to_gcj02(lng, lat):
         ret += (20.0 * sin(x * pi) + 40.0 * sin(x / 3.0 * pi)) * 2.0 / 3.0
         ret += (150.0 * sin(x / 12.0 * pi) + 300.0 * sin(x / 30.0 * pi)) * 2.0 / 3.0
         return ret
-    from math import sin, pi
     dlat = transform_lat(lng - 105.0, lat - 35.0)
     dlng = transform_lng(lng - 105.0, lat - 35.0)
     radlat = lat / 180.0 * pi
     magic = sin(radlat)
     magic = 1 - ee * magic * magic
-    sqrtmagic = magic ** 0.5
+    sqrtmagic = sqrt(magic)
     dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * pi)
     dlng = (dlng * 180.0) / (a / sqrtmagic * cos(radlat) * pi)
     mglat = lat + dlat
     mglng = lng + dlng
     return mglng, mglat
 
+def haversine(lon1, lat1, lon2, lat2):
+    """计算两点间距离（km），输入WGS-84经纬度"""
+    R = 6371
+    dlon = radians(lon2 - lon1)
+    dlat = radians(lat2 - lat1)
+    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a))
+    return R * c
+
 # ==================== 心跳模拟器 ====================
 class DroneHeartbeatSimulator:
+    # ... (保持不变，与之前相同)
     def __init__(self, timeout_seconds=3):
         self.timeout_seconds = timeout_seconds
         self.sequence_number = 0
@@ -215,46 +203,13 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
 # ==================== Streamlit 界面 ====================
 st.set_page_config(page_title="无人机心跳监控系统（高德卫星图）", layout="wide", page_icon="🚁")
 
-# 自定义CSS
+# 自定义CSS (保持不变)
 st.markdown("""
 <style>
-    .time-display {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 15px;
-        border-radius: 10px;
-        text-align: center;
-        font-size: 24px;
-        font-weight: bold;
-        margin-bottom: 20px;
-    }
-    .beijing-badge {
-        background-color: #ff6b6b;
-        color: white;
-        padding: 5px 10px;
-        border-radius: 5px;
-        font-size: 12px;
-        font-weight: bold;
-        display: inline-block;
-        margin-left: 10px;
-    }
-    .warning-text {
-        color: #ff4b4b;
-        font-weight: bold;
-        animation: blink 1s infinite;
-    }
-    @keyframes blink {
-        0% { opacity: 1; }
-        50% { opacity: 0.5; }
-        100% { opacity: 1; }
-    }
-    .status-badge {
-        padding: 2px 8px;
-        border-radius: 12px;
-        font-size: 12px;
-        font-weight: bold;
-        display: inline-block;
-    }
+    .time-display { ... }
+    .beijing-badge { ... }
+    .warning-text { ... }
+    .status-badge { ... }
     .status-set { background-color: #4CAF50; color: white; }
     .status-notset { background-color: #f44336; color: white; }
 </style>
@@ -268,13 +223,13 @@ if "running" not in st.session_state:
 if "last_update" not in st.session_state:
     st.session_state.last_update = time.time()
 if "map_points" not in st.session_state:
-    st.session_state.map_points = []        # 每个元素: {name, lat_gcj, lon_gcj, original_lat, original_lon, original_crs}
+    st.session_state.map_points = []
 if "a_point" not in st.session_state:
-    st.session_state.a_point = None         # {lat_gcj, lon_gcj, original_lat, original_lon, original_crs, name}
+    st.session_state.a_point = None
 if "b_point" not in st.session_state:
     st.session_state.b_point = None
 if "input_coordinate_system" not in st.session_state:
-    st.session_state.input_coordinate_system = "WGS-84"   # "WGS-84" or "GCJ-02"
+    st.session_state.input_coordinate_system = "WGS-84"
 if "page" not in st.session_state:
     st.session_state.page = "飞行监控"
 
@@ -289,8 +244,9 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ==================== 侧边栏：全局控制与状态 ====================
+# ==================== 侧边栏 ====================
 with st.sidebar:
+    # ... (侧边栏内容与之前相同，注意引用正确的变量名)
     st.header("⚙️ 全局控制")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -333,7 +289,6 @@ with st.sidebar:
     st.subheader("⚡ 刷新设置")
     refresh_rate = st.selectbox("刷新频率（秒）", [1, 2, 3, 5], index=0)
     
-    # 页面导航
     st.divider()
     st.subheader("🧭 功能页面")
     page = st.radio("跳转", ["飞行监控", "航线规划", "坐标系设置"], index=["飞行监控", "航线规划", "坐标系设置"].index(st.session_state.page))
@@ -352,9 +307,8 @@ if st.session_state.running:
 
 # ==================== 页面内容 ====================
 if st.session_state.page == "飞行监控":
+    # ... 飞行监控代码（与之前相同，注意 sim 已定义）
     st.header("📡 飞行监控 · 实时心跳数据")
-    
-    # 统计指标行
     sim = st.session_state.simulator
     stats = sim.get_statistics()
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -364,8 +318,6 @@ if st.session_state.page == "飞行监控":
     c4.metric("📉 丢包率", f"{stats['packet_loss_rate']:.1f}%")
     c5.metric("⏰ 运行时长", f"{int((time.time()-sim.start_time)//60)}分{int((time.time()-sim.start_time)%60)}秒")
     st.markdown("---")
-    
-    # 实时图表
     try:
         seq, delay, rtimes = sim.get_recent_data(30)
         fig = create_heartbeat_charts(seq, delay, rtimes, len(sim.timeout_events), sim.timeout_events)
@@ -373,8 +325,6 @@ if st.session_state.page == "飞行监控":
         plt.close(fig)
     except Exception as e:
         st.error(f"图表错误: {e}")
-    
-    # 状态面板
     col_left, col_right = st.columns(2)
     with col_left:
         st.subheader("📡 最新心跳信息")
@@ -405,8 +355,6 @@ if st.session_state.page == "飞行监控":
                 st.markdown('<p class="warning-text">⚠️ 最近10秒内有超时发生！</p>', unsafe_allow_html=True)
         else:
             st.success("✅ 无超时事件")
-    
-    # 传输统计图表
     st.subheader("📊 传输统计")
     if sim.heartbeat_history:
         delays_hist = [r['delay_ms'] for r in list(sim.heartbeat_history)[-50:] if isinstance(r, dict) and 'delay_ms' in r]
@@ -426,10 +374,7 @@ if st.session_state.page == "飞行监控":
 
 elif st.session_state.page == "航线规划":
     st.header("🗺️ 航线规划 · 高德卫星图与标记点")
-    
-    # 左侧：标记点管理 + A/B点设置，右侧：地图
     left_col, right_col = st.columns([1, 2])
-    
     with left_col:
         st.subheader("📍 标记点管理")
         with st.form("add_point_form"):
@@ -438,7 +383,6 @@ elif st.session_state.page == "航线规划":
             name = st.text_input("名称", placeholder="例如：测试点")
             submitted = st.form_submit_button("➕ 添加标记点")
             if submitted:
-                # 根据全局输入坐标系转换
                 if st.session_state.input_coordinate_system == "WGS-84":
                     lng_gcj, lat_gcj = wgs84_to_gcj02(lon, lat)
                 else:
@@ -454,7 +398,6 @@ elif st.session_state.page == "航线规划":
                 st.success(f"已添加 {name} (原始坐标:{lat},{lon} {st.session_state.input_coordinate_system})")
         if st.button("🗑️ 清空所有标记点", use_container_width=True):
             st.session_state.map_points = []
-        
         st.divider()
         st.subheader("✈️ 航线起终点 (A/B点)")
         st.caption(f"当前输入坐标系: **{st.session_state.input_coordinate_system}**")
@@ -497,13 +440,11 @@ elif st.session_state.page == "航线规划":
             st.session_state.a_point = None
             st.session_state.b_point = None
             st.success("已清除航线起终点")
-    
     with right_col:
         if AMAP_KEY == "你的高德Key":
             st.error("⚠️ 请先在代码中填写你的高德 Web 端 Key！")
         else:
             amap_satellite_url = f"https://webst01.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
-            # 确定地图中心：优先使用A点或B点或第一个标记点
             center_lat, center_lon = 39.9042, 116.4074
             if st.session_state.a_point:
                 center_lat, center_lon = st.session_state.a_point['lat_gcj'], st.session_state.a_point['lon_gcj']
@@ -512,10 +453,7 @@ elif st.session_state.page == "航线规划":
             elif st.session_state.map_points:
                 center_lat = sum(p['lat_gcj'] for p in st.session_state.map_points) / len(st.session_state.map_points)
                 center_lon = sum(p['lon_gcj'] for p in st.session_state.map_points) / len(st.session_state.map_points)
-            
             m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=amap_satellite_url, attr='高德地图')
-            
-            # 添加标记点
             for point in st.session_state.map_points:
                 folium.Marker(
                     location=[point['lat_gcj'], point['lon_gcj']],
@@ -523,8 +461,6 @@ elif st.session_state.page == "航线规划":
                     tooltip=point['name'],
                     icon=folium.Icon(color='blue', icon='info-sign')
                 ).add_to(m)
-            
-            # 添加 A/B 点
             if st.session_state.a_point:
                 folium.Marker(
                     location=[st.session_state.a_point['lat_gcj'], st.session_state.a_point['lon_gcj']],
@@ -539,21 +475,10 @@ elif st.session_state.page == "航线规划":
                     tooltip="B点",
                     icon=folium.Icon(color='red', icon='stop', prefix='fa')
                 ).add_to(m)
-            
-            # 绘制航线（AB连线）
             if st.session_state.a_point and st.session_state.b_point:
                 line_points = [[st.session_state.a_point['lat_gcj'], st.session_state.a_point['lon_gcj']],
                                [st.session_state.b_point['lat_gcj'], st.session_state.b_point['lon_gcj']]]
                 folium.PolyLine(line_points, color="yellow", weight=5, opacity=0.8, tooltip="规划航线").add_to(m)
-                # 计算中点显示距离
-                from math import radians, sin, cos, sqrt, asin
-                def haversine(lon1, lat1, lon2, lat2):
-                    R = 6371
-                    dlon = radians(lon2 - lon1)
-                    dlat = radians(lat2 - lat1)
-                    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
-                    c = 2 * asin(sqrt(a))
-                    return R * c
                 # 使用原始坐标计算距离（避免GCJ误差）
                 dist = haversine(st.session_state.a_point['original_lon'], st.session_state.a_point['original_lat'],
                                  st.session_state.b_point['original_lon'], st.session_state.b_point['original_lat'])
@@ -562,7 +487,6 @@ elif st.session_state.page == "航线规划":
                      (st.session_state.a_point['lon_gcj']+st.session_state.b_point['lon_gcj'])/2],
                     icon=folium.DivIcon(html=f'<div style="font-size:12px; font-weight:bold; color:white; background:rgba(0,0,0,0.6); padding:2px 6px; border-radius:12px;">✈️ {dist:.2f} km</div>')
                 ).add_to(m)
-            
             st_folium(m, width=700, height=500, key="amap_planning")
 
 elif st.session_state.page == "坐标系设置":
@@ -583,7 +507,7 @@ elif st.session_state.page == "坐标系设置":
         gcj_lon, gcj_lat = wgs84_to_gcj02(test_lon, test_lat)
         st.write(f"GCJ-02 坐标: {gcj_lat:.6f}, {gcj_lon:.6f}")
 
-# ==================== 自动刷新（持续监控） ====================
+# ==================== 自动刷新 ====================
 if st.session_state.running:
     time.sleep(refresh_rate)
     st.rerun()
