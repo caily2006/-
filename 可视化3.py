@@ -1,3 +1,25 @@
+import math
+
+# 定义WGS84转GCJ02核心函数
+def wgs84_to_gcj02(lon, lat):
+    # 地球参数
+    a = 6378245.0  # 长半轴
+    ee = 0.00669342162296594323  # 扁率
+    dlat = lat - 39.9
+    dlon = lon - 116.39999999999999
+    
+    # 计算偏移量
+    radlat = dlat * math.pi / 180.0
+    magic = math.sin(radlat)
+    sqrtmagic = math.sqrt(1 - ee * magic * magic)
+    
+    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (sqrtmagic * (1 - ee * magic * magic)) * math.pi)
+    dlon = (dlon * 180.0) / (a / sqrtmagic * math.cos(radlat) * math.pi)
+    
+    # 计算GCJ02坐标
+    mglat = lat + dlat
+    mglon = lon + dlon
+    return mglon, mglat
 import time
 import datetime
 import random
