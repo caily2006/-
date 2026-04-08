@@ -79,10 +79,8 @@ def segments_intersect(p1, q1, p2, q2):
     o2 = orientation(p1, q1, q2)
     o3 = orientation(p2, q2, p1)
     o4 = orientation(p2, q2, q1)
-    # 一般情况
     if o1 != o2 and o3 != o4:
         return True
-    # 特殊情况：共线且重叠
     if o1 == 0 and on_segment(p1, p2, q1): return True
     if o2 == 0 and on_segment(p1, q2, q1): return True
     if o3 == 0 and on_segment(p2, p1, q2): return True
@@ -91,15 +89,11 @@ def segments_intersect(p1, q1, p2, q2):
 
 def line_polygon_intersect(line_start, line_end, polygon):
     """判断线段与多边形是否相交（含边界）"""
-    # 先检查线段是否完全在多边形内部（简单检查中点）
-    # 但为了性能，先检查线段与任何一条边是否相交
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i+1) % len(polygon)]
         if segments_intersect(line_start, line_end, p1, p2):
             return True
-    # 再检查线段端点是否在多边形内部（可选，如果线段完全内部但未与边相交，则也算相交）
-    # 使用射线法检查点是否在多边形内
     def point_in_polygon(point, poly):
         x, y = point
         inside = False
@@ -116,7 +110,6 @@ def line_polygon_intersect(line_start, line_end, polygon):
 
 # ==================== 障碍物管理（记忆） ====================
 def load_obstacles():
-    """从JSON文件加载障碍物列表"""
     if os.path.exists(OBSTACLE_FILE):
         try:
             with open(OBSTACLE_FILE, 'r', encoding='utf-8') as f:
@@ -126,11 +119,10 @@ def load_obstacles():
     return []
 
 def save_obstacles(obstacles):
-    """保存障碍物列表到JSON文件"""
     with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
         json.dump(obstacles, f, ensure_ascii=False, indent=2)
 
-# ==================== 心跳模拟器（保持不变） ====================
+# ==================== 心跳模拟器 ====================
 class DroneHeartbeatSimulator:
     def __init__(self, timeout_seconds=3):
         self.timeout_seconds = timeout_seconds
@@ -310,7 +302,9 @@ if "input_coordinate_system" not in st.session_state:
 if "page" not in st.session_state:
     st.session_state.page = "飞行监控"
 if "obstacles" not in st.session_state:
-    st.session_state.obstacles = load_obstacles()   # 加载记忆障碍物
+    st.session_state.obstacles = load_obstacles()
+if "flight_altitude" not in st.session_state:      # 新增：飞行高度（米）
+    st.session_state.flight_altitude = 100.0
 
 # 标题
 st.title("🚁 无人机实时监控与智能航线规划系统")
@@ -341,7 +335,6 @@ with st.sidebar:
             st.session_state.map_points = []
             st.session_state.a_point = None
             st.session_state.b_point = None
-            # 注意：不清除障碍物，如需清除请在障碍物管理界面操作
     st.divider()
     st.subheader("📊 实时统计")
     sim = st.session_state.simulator
@@ -363,6 +356,8 @@ with st.sidebar:
         st.caption(f"原始: {st.session_state.a_point['original_lat']:.6f}, {st.session_state.a_point['original_lon']:.6f} ({st.session_state.a_point['original_crs']})")
     if st.session_state.b_point:
         st.caption(f"原始: {st.session_state.b_point['original_lat']:.6f}, {st.session_state.b_point['original_lon']:.6f} ({st.session_state.b_point['original_crs']})")
+    # 显示当前飞行高度
+    st.metric("🚁 巡航高度", f"{st.session_state.flight_altitude:.0f} m")
     st.divider()
     st.subheader("⚡ 刷新设置")
     refresh_rate = st.selectbox("刷新频率（秒）", [1, 2, 3, 5], index=0)
@@ -521,23 +516,27 @@ elif st.session_state.page == "航线规划":
             st.success("已清除航线起终点")
         
         st.divider()
+        st.subheader("🚁 飞行高度设置")
+        altitude = st.slider("巡航高度 (米)", min_value=0, max_value=1000, value=int(st.session_state.flight_altitude), step=10)
+        st.session_state.flight_altitude = float(altitude)
+        st.caption("设定无人机飞行高度，用于碰撞风险评估参考。")
+        
+        st.divider()
         st.subheader("⚠️ 障碍物与碰撞检测")
         show_obstacles = st.checkbox("在地图上显示障碍物区域", value=True)
         if st.session_state.a_point and st.session_state.b_point:
-            # 获取AB线段坐标（GCJ-02）
             line_start = (st.session_state.a_point['lon_gcj'], st.session_state.a_point['lat_gcj'])
             line_end = (st.session_state.b_point['lon_gcj'], st.session_state.b_point['lat_gcj'])
             collision = False
             for obs in st.session_state.obstacles:
-                # 障碍物坐标存储为 [[lng, lat], ...]
                 polygon = [(c[0], c[1]) for c in obs['coordinates']]
                 if line_polygon_intersect(line_start, line_end, polygon):
                     collision = True
                     break
             if collision:
-                st.markdown('<div class="danger-text">⚠️ 警告：规划航线与障碍物相交！请调整A/B点或修改障碍物区域。</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="danger-text">⚠️ 警告：规划航线与障碍物相交！当前飞行高度 {st.session_state.flight_altitude:.0f} m，请调整A/B点或修改障碍物区域。</div>', unsafe_allow_html=True)
             else:
-                st.markdown('<div class="safe-text">✅ 安全：规划航线未与任何障碍物相交。</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="safe-text">✅ 安全：规划航线未与任何障碍物相交。飞行高度 {st.session_state.flight_altitude:.0f} m。</div>', unsafe_allow_html=True)
         else:
             st.info("请先设置 A 点和 B 点以进行碰撞检测。")
         st.caption("💡 提示：右侧地图可直接绘制多边形障碍物（使用绘图工具），绘制后自动保存并参与碰撞检测。")
@@ -547,7 +546,6 @@ elif st.session_state.page == "航线规划":
             st.error("⚠️ 请先在代码中填写你的高德 Web 端 Key！")
         else:
             amap_satellite_url = f"https://webst01.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
-            # 确定地图中心
             center_lat, center_lon = 39.9042, 116.4074
             if st.session_state.a_point:
                 center_lat, center_lon = st.session_state.a_point['lat_gcj'], st.session_state.a_point['lon_gcj']
@@ -559,7 +557,6 @@ elif st.session_state.page == "航线规划":
             
             m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=amap_satellite_url, attr='高德地图')
             
-            # 添加标记点
             for point in st.session_state.map_points:
                 folium.Marker(
                     location=[point['lat_gcj'], point['lon_gcj']],
@@ -567,7 +564,6 @@ elif st.session_state.page == "航线规划":
                     tooltip=point['name'],
                     icon=folium.Icon(color='blue', icon='info-sign')
                 ).add_to(m)
-            # 添加 A/B 点
             if st.session_state.a_point:
                 folium.Marker(
                     location=[st.session_state.a_point['lat_gcj'], st.session_state.a_point['lon_gcj']],
@@ -582,23 +578,22 @@ elif st.session_state.page == "航线规划":
                     tooltip="B点",
                     icon=folium.Icon(color='red', icon='stop', prefix='fa')
                 ).add_to(m)
-            # 绘制航线
             if st.session_state.a_point and st.session_state.b_point:
                 line_points = [[st.session_state.a_point['lat_gcj'], st.session_state.a_point['lon_gcj']],
                                [st.session_state.b_point['lat_gcj'], st.session_state.b_point['lon_gcj']]]
                 folium.PolyLine(line_points, color="yellow", weight=5, opacity=0.8, tooltip="规划航线").add_to(m)
                 dist = haversine(st.session_state.a_point['original_lon'], st.session_state.a_point['original_lat'],
                                  st.session_state.b_point['original_lon'], st.session_state.b_point['original_lat'])
+                # 航线中点标签增加高度信息
                 folium.map.Marker(
                     [(st.session_state.a_point['lat_gcj']+st.session_state.b_point['lat_gcj'])/2,
                      (st.session_state.a_point['lon_gcj']+st.session_state.b_point['lon_gcj'])/2],
-                    icon=folium.DivIcon(html=f'<div style="font-size:12px; font-weight:bold; color:white; background:rgba(0,0,0,0.6); padding:2px 6px; border-radius:12px;">✈️ {dist:.2f} km</div>')
+                    icon=folium.DivIcon(html=f'<div style="font-size:12px; font-weight:bold; color:white; background:rgba(0,0,0,0.6); padding:2px 6px; border-radius:12px;">✈️ {dist:.2f} km | 高度 {st.session_state.flight_altitude:.0f}m</div>')
                 ).add_to(m)
             
-            # 显示障碍物
             if show_obstacles:
                 for obs in st.session_state.obstacles:
-                    coords = [[lat, lng] for lng, lat in obs['coordinates']]  # folium 需要 [lat, lng]
+                    coords = [[lat, lng] for lng, lat in obs['coordinates']]
                     folium.Polygon(
                         locations=coords,
                         color=obs.get('color', 'red'),
@@ -609,7 +604,6 @@ elif st.session_state.page == "航线规划":
                         tooltip=obs.get('name', '障碍物')
                     ).add_to(m)
             
-            # 添加绘图控件（允许绘制多边形、编辑、删除）
             draw = Draw(
                 draw_options={
                     'polygon': {'allowIntersection': False, 'showArea': True, 'shapeOptions': {'color': '#ff0000'}},
@@ -623,15 +617,13 @@ elif st.session_state.page == "航线规划":
             )
             draw.add_to(m)
             
-            # 获取绘图结果
             output = st_folium(m, width=700, height=500, key="planning_with_draw")
             
-            # 处理新绘制的多边形（保存到障碍物列表）
             if output and 'last_active_drawing' in output and output['last_active_drawing']:
                 drawing = output['last_active_drawing']
                 if drawing and drawing.get('geometry', {}).get('type') == 'Polygon':
-                    coords = drawing['geometry']['coordinates'][0]  # 外环
-                    coords = [[c[0], c[1]] for c in coords]  # [[lng, lat], ...]
+                    coords = drawing['geometry']['coordinates'][0]
+                    coords = [[c[0], c[1]] for c in coords]
                     new_id = str(int(time.time() * 1000))
                     new_name = f"障碍物_{len(st.session_state.obstacles)+1}"
                     st.session_state.obstacles.append({
