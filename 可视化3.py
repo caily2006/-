@@ -59,6 +59,61 @@ def haversine(lon1, lat1, lon2, lat2):
     c = 2 * asin(sqrt(a))
     return R * c
 
+# ==================== 几何工具（线段-多边形相交检测） ====================
+def on_segment(p, q, r):
+    """检查点q是否在线段pr上（包含端点）"""
+    if (q[0] <= max(p[0], r[0]) and q[0] >= min(p[0], r[0]) and
+        q[1] <= max(p[1], r[1]) and q[1] >= min(p[1], r[1])):
+        return True
+    return False
+
+def orientation(p, q, r):
+    """计算三点方向：0共线，1顺时针，2逆时针"""
+    val = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
+    if val == 0: return 0
+    return 1 if val > 0 else 2
+
+def segments_intersect(p1, q1, p2, q2):
+    """判断线段p1q1和p2q2是否相交"""
+    o1 = orientation(p1, q1, p2)
+    o2 = orientation(p1, q1, q2)
+    o3 = orientation(p2, q2, p1)
+    o4 = orientation(p2, q2, q1)
+    # 一般情况
+    if o1 != o2 and o3 != o4:
+        return True
+    # 特殊情况：共线且重叠
+    if o1 == 0 and on_segment(p1, p2, q1): return True
+    if o2 == 0 and on_segment(p1, q2, q1): return True
+    if o3 == 0 and on_segment(p2, p1, q2): return True
+    if o4 == 0 and on_segment(p2, q1, q2): return True
+    return False
+
+def line_polygon_intersect(line_start, line_end, polygon):
+    """判断线段与多边形是否相交（含边界）"""
+    # 先检查线段是否完全在多边形内部（简单检查中点）
+    # 但为了性能，先检查线段与任何一条边是否相交
+    for i in range(len(polygon)):
+        p1 = polygon[i]
+        p2 = polygon[(i+1) % len(polygon)]
+        if segments_intersect(line_start, line_end, p1, p2):
+            return True
+    # 再检查线段端点是否在多边形内部（可选，如果线段完全内部但未与边相交，则也算相交）
+    # 使用射线法检查点是否在多边形内
+    def point_in_polygon(point, poly):
+        x, y = point
+        inside = False
+        n = len(poly)
+        for i in range(n):
+            x1, y1 = poly[i]
+            x2, y2 = poly[(i+1) % n]
+            if ((y1 > y) != (y2 > y)) and (x < (x2-x1)*(y-y1)/(y2-y1) + x1):
+                inside = not inside
+        return inside
+    if point_in_polygon(line_start, polygon) or point_in_polygon(line_end, polygon):
+        return True
+    return False
+
 # ==================== 障碍物管理（记忆） ====================
 def load_obstacles():
     """从JSON文件加载障碍物列表"""
@@ -220,7 +275,7 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
     return fig
 
 # ==================== Streamlit 界面 ====================
-st.set_page_config(page_title="无人机监控与障碍物规划", layout="wide", page_icon="🚁")
+st.set_page_config(page_title="无人机监控与智能航线规划", layout="wide", page_icon="🚁")
 
 # 自定义CSS
 st.markdown("""
@@ -232,6 +287,8 @@ st.markdown("""
     .status-badge { padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; display: inline-block; }
     .status-set { background-color: #4CAF50; color: white; }
     .status-notset { background-color: #f44336; color: white; }
+    .safe-text { color: #4CAF50; font-weight: bold; }
+    .danger-text { color: #f44336; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -393,7 +450,8 @@ if st.session_state.page == "飞行监控":
             plt.close(fig2)
 
 elif st.session_state.page == "航线规划":
-    st.header("🗺️ 航线规划 · 高德卫星图与标记点")
+    st.header("🗺️ 航线规划 · 集成障碍物圈选与碰撞检测")
+    
     left_col, right_col = st.columns([1, 2])
     with left_col:
         st.subheader("📍 标记点管理")
@@ -418,6 +476,7 @@ elif st.session_state.page == "航线规划":
                 st.success(f"已添加 {name} (原始坐标:{lat},{lon} {st.session_state.input_coordinate_system})")
         if st.button("🗑️ 清空所有标记点", use_container_width=True):
             st.session_state.map_points = []
+        
         st.divider()
         st.subheader("✈️ 航线起终点 (A/B点)")
         st.caption(f"当前输入坐标系: **{st.session_state.input_coordinate_system}**")
@@ -460,9 +519,28 @@ elif st.session_state.page == "航线规划":
             st.session_state.a_point = None
             st.session_state.b_point = None
             st.success("已清除航线起终点")
+        
         st.divider()
-        st.subheader("⚠️ 障碍物显示开关")
+        st.subheader("⚠️ 障碍物与碰撞检测")
         show_obstacles = st.checkbox("在地图上显示障碍物区域", value=True)
+        if st.session_state.a_point and st.session_state.b_point:
+            # 获取AB线段坐标（GCJ-02）
+            line_start = (st.session_state.a_point['lon_gcj'], st.session_state.a_point['lat_gcj'])
+            line_end = (st.session_state.b_point['lon_gcj'], st.session_state.b_point['lat_gcj'])
+            collision = False
+            for obs in st.session_state.obstacles:
+                # 障碍物坐标存储为 [[lng, lat], ...]
+                polygon = [(c[0], c[1]) for c in obs['coordinates']]
+                if line_polygon_intersect(line_start, line_end, polygon):
+                    collision = True
+                    break
+            if collision:
+                st.markdown('<div class="danger-text">⚠️ 警告：规划航线与障碍物相交！请调整A/B点或修改障碍物区域。</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="safe-text">✅ 安全：规划航线未与任何障碍物相交。</div>', unsafe_allow_html=True)
+        else:
+            st.info("请先设置 A 点和 B 点以进行碰撞检测。")
+        st.caption("💡 提示：右侧地图可直接绘制多边形障碍物（使用绘图工具），绘制后自动保存并参与碰撞检测。")
     
     with right_col:
         if AMAP_KEY == "你的高德Key":
@@ -516,10 +594,10 @@ elif st.session_state.page == "航线规划":
                      (st.session_state.a_point['lon_gcj']+st.session_state.b_point['lon_gcj'])/2],
                     icon=folium.DivIcon(html=f'<div style="font-size:12px; font-weight:bold; color:white; background:rgba(0,0,0,0.6); padding:2px 6px; border-radius:12px;">✈️ {dist:.2f} km</div>')
                 ).add_to(m)
+            
             # 显示障碍物
             if show_obstacles:
                 for obs in st.session_state.obstacles:
-                    # obs 结构: {"id": str, "name": str, "coordinates": [[lng, lat], ...], "color": str}
                     coords = [[lat, lng] for lng, lat in obs['coordinates']]  # folium 需要 [lat, lng]
                     folium.Polygon(
                         locations=coords,
@@ -530,19 +608,49 @@ elif st.session_state.page == "航线规划":
                         popup=obs.get('name', '障碍物'),
                         tooltip=obs.get('name', '障碍物')
                     ).add_to(m)
-            # 显示地图（不包含绘图控件，绘图控件放在障碍物管理页面）
-            st_folium(m, width=700, height=500, key="amap_planning")
+            
+            # 添加绘图控件（允许绘制多边形、编辑、删除）
+            draw = Draw(
+                draw_options={
+                    'polygon': {'allowIntersection': False, 'showArea': True, 'shapeOptions': {'color': '#ff0000'}},
+                    'polyline': False,
+                    'rectangle': False,
+                    'circle': False,
+                    'marker': False,
+                    'circlemarker': False
+                },
+                edit_options={'edit': True, 'remove': True}
+            )
+            draw.add_to(m)
+            
+            # 获取绘图结果
+            output = st_folium(m, width=700, height=500, key="planning_with_draw")
+            
+            # 处理新绘制的多边形（保存到障碍物列表）
+            if output and 'last_active_drawing' in output and output['last_active_drawing']:
+                drawing = output['last_active_drawing']
+                if drawing and drawing.get('geometry', {}).get('type') == 'Polygon':
+                    coords = drawing['geometry']['coordinates'][0]  # 外环
+                    coords = [[c[0], c[1]] for c in coords]  # [[lng, lat], ...]
+                    new_id = str(int(time.time() * 1000))
+                    new_name = f"障碍物_{len(st.session_state.obstacles)+1}"
+                    st.session_state.obstacles.append({
+                        "id": new_id,
+                        "name": new_name,
+                        "coordinates": coords,
+                        "color": "red"
+                    })
+                    save_obstacles(st.session_state.obstacles)
+                    st.success(f"已添加障碍物: {new_name}")
+                    st.rerun()
 
 elif st.session_state.page == "障碍物管理":
-    st.header("⛔ 障碍物圈选与管理（多边形）")
-    st.markdown("在地图上绘制多边形障碍物区域，支持编辑、删除、记忆保存。")
-    
-    # 左右布局：左侧列表，右侧绘图地图
+    st.header("⛔ 障碍物管理 · 列表与高级操作")
     col_left, col_right = st.columns([1, 2])
     with col_left:
         st.subheader("📋 障碍物列表")
         if not st.session_state.obstacles:
-            st.info("暂无障碍物，请在右侧地图绘制多边形。")
+            st.info("暂无障碍物，请前往「航线规划」页面绘制多边形，或点击下方导入。")
         else:
             for idx, obs in enumerate(st.session_state.obstacles):
                 col1, col2, col3 = st.columns([3, 1, 1])
@@ -557,10 +665,10 @@ elif st.session_state.page == "障碍物管理":
                         obs['name'] = new_name
                         save_obstacles(st.session_state.obstacles)
                         st.rerun()
-            if st.button("🗑️ 清空所有障碍物", use_container_width=True):
-                st.session_state.obstacles = []
-                save_obstacles([])
-                st.rerun()
+        if st.button("🗑️ 清空所有障碍物", use_container_width=True):
+            st.session_state.obstacles = []
+            save_obstacles([])
+            st.rerun()
         st.divider()
         st.subheader("⚙️ 导入/导出")
         uploaded_file = st.file_uploader("导入障碍物 JSON", type=["json"])
@@ -581,81 +689,7 @@ elif st.session_state.page == "障碍物管理":
             st.download_button("下载 JSON", data=json_str, file_name="obstacles.json", mime="application/json")
     
     with col_right:
-        if AMAP_KEY == "你的高德Key":
-            st.error("⚠️ 请先在代码中填写你的高德 Web 端 Key！")
-        else:
-            amap_satellite_url = f"https://webst01.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
-            # 地图中心：优先使用 A/B 点或第一个障碍物中心
-            center_lat, center_lon = 39.9042, 116.4074
-            if st.session_state.a_point:
-                center_lat, center_lon = st.session_state.a_point['lat_gcj'], st.session_state.a_point['lon_gcj']
-            elif st.session_state.b_point:
-                center_lat, center_lon = st.session_state.b_point['lat_gcj'], st.session_state.b_point['lon_gcj']
-            elif st.session_state.obstacles:
-                # 计算所有障碍物点的平均中心
-                all_coords = []
-                for obs in st.session_state.obstacles:
-                    all_coords.extend(obs['coordinates'])
-                if all_coords:
-                    center_lon = sum(c[0] for c in all_coords) / len(all_coords)
-                    center_lat = sum(c[1] for c in all_coords) / len(all_coords)
-            
-            # 创建地图，添加 Draw 控件
-            m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=amap_satellite_url, attr='高德地图')
-            
-            # 显示已有障碍物
-            for obs in st.session_state.obstacles:
-                coords = [[lat, lng] for lng, lat in obs['coordinates']]
-                folium.Polygon(
-                    locations=coords,
-                    color=obs.get('color', 'red'),
-                    weight=3,
-                    fill=True,
-                    fill_opacity=0.3,
-                    popup=obs.get('name', '障碍物'),
-                    tooltip=obs.get('name', '障碍物')
-                ).add_to(m)
-            
-            # 添加绘图控件（允许绘制多边形、编辑、删除）
-            draw = Draw(
-                draw_options={
-                    'polygon': {'allowIntersection': False, 'showArea': True, 'shapeOptions': {'color': '#ff0000'}},
-                    'polyline': False,
-                    'rectangle': False,
-                    'circle': False,
-                    'marker': False,
-                    'circlemarker': False
-                },
-                edit_options={'edit': True, 'remove': True}
-            )
-            draw.add_to(m)
-            
-            # 获取绘图结果
-            output = st_folium(m, width=700, height=500, key="obstacle_draw")
-            
-            # 处理新绘制的多边形
-            if output and 'last_active_drawing' in output and output['last_active_drawing']:
-                drawing = output['last_active_drawing']
-                if drawing and drawing.get('geometry', {}).get('type') == 'Polygon':
-                    # 提取坐标（注意 folium.Draw 返回的坐标是 [[lng, lat], ...]）
-                    coords = drawing['geometry']['coordinates'][0]  # 外环
-                    # 标准化为 [[lng, lat], ...]
-                    coords = [[c[0], c[1]] for c in coords]
-                    # 生成唯一ID
-                    new_id = str(int(time.time() * 1000))
-                    new_name = f"障碍物_{len(st.session_state.obstacles)+1}"
-                    st.session_state.obstacles.append({
-                        "id": new_id,
-                        "name": new_name,
-                        "coordinates": coords,
-                        "color": "red"
-                    })
-                    save_obstacles(st.session_state.obstacles)
-                    st.success(f"已添加障碍物: {new_name}")
-                    st.rerun()
-            
-            # 提示
-            st.info("✏️ 使用左侧绘图工具栏绘制多边形，绘制完成后自动保存。可点击多边形编辑或删除。")
+        st.info("📌 提示：要绘制新障碍物，请前往「航线规划」页面，使用地图上的绘图工具直接绘制。本页面仅用于管理现有障碍物（重命名、删除、导入导出）。")
 
 elif st.session_state.page == "坐标系设置":
     st.header("🌐 坐标系设置")
