@@ -1,6 +1,8 @@
 import time
 import datetime
 import random
+import json
+import os
 from collections import deque
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -10,16 +12,18 @@ import numpy as np
 import pandas as pd
 import pytz
 import folium
+from folium.plugins import Draw
 from streamlit_folium import st_folium
 from math import radians, sin, cos, sqrt, asin, pi
 
 # ==================== 配置 ====================
 AMAP_KEY = "0c475e7a50516001883c104383b43f31"   # 高德 Web 端 Key
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
+OBSTACLE_FILE = "obstacles.json"                # 障碍物数据持久化文件
 
 # ==================== 坐标转换（WGS-84 <-> GCJ-02） ====================
 def wgs84_to_gcj02(lng, lat):
-    """WGS-84 转 GCJ-02 (高德/百度) 简化算法"""
+    """WGS-84 转 GCJ-02 (高德/百度)"""
     a = 6378245.0
     ee = 0.00669342162296594323
     def transform_lat(x, y):
@@ -47,7 +51,7 @@ def wgs84_to_gcj02(lng, lat):
     return mglng, mglat
 
 def haversine(lon1, lat1, lon2, lat2):
-    """计算两点间距离（km），输入WGS-84经纬度"""
+    """计算两点间距离（km）"""
     R = 6371
     dlon = radians(lon2 - lon1)
     dlat = radians(lat2 - lat1)
@@ -55,9 +59,24 @@ def haversine(lon1, lat1, lon2, lat2):
     c = 2 * asin(sqrt(a))
     return R * c
 
-# ==================== 心跳模拟器 ====================
+# ==================== 障碍物管理（记忆） ====================
+def load_obstacles():
+    """从JSON文件加载障碍物列表"""
+    if os.path.exists(OBSTACLE_FILE):
+        try:
+            with open(OBSTACLE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_obstacles(obstacles):
+    """保存障碍物列表到JSON文件"""
+    with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(obstacles, f, ensure_ascii=False, indent=2)
+
+# ==================== 心跳模拟器（保持不变） ====================
 class DroneHeartbeatSimulator:
-    # ... (保持不变，与之前相同)
     def __init__(self, timeout_seconds=3):
         self.timeout_seconds = timeout_seconds
         self.sequence_number = 0
@@ -201,21 +220,22 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
     return fig
 
 # ==================== Streamlit 界面 ====================
-st.set_page_config(page_title="无人机心跳监控系统（高德卫星图）", layout="wide", page_icon="🚁")
+st.set_page_config(page_title="无人机监控与障碍物规划", layout="wide", page_icon="🚁")
 
-# 自定义CSS (保持不变)
+# 自定义CSS
 st.markdown("""
 <style>
-    .time-display { ... }
-    .beijing-badge { ... }
-    .warning-text { ... }
-    .status-badge { ... }
+    .time-display { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 10px; text-align: center; font-size: 24px; font-weight: bold; margin-bottom: 20px; }
+    .beijing-badge { background-color: #ff6b6b; color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; font-weight: bold; display: inline-block; margin-left: 10px; }
+    .warning-text { color: #ff4b4b; font-weight: bold; animation: blink 1s infinite; }
+    @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    .status-badge { padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; display: inline-block; }
     .status-set { background-color: #4CAF50; color: white; }
     .status-notset { background-color: #f44336; color: white; }
 </style>
 """, unsafe_allow_html=True)
 
-# 初始化 session state
+# 初始化 session_state
 if "simulator" not in st.session_state:
     st.session_state.simulator = DroneHeartbeatSimulator(timeout_seconds=3)
 if "running" not in st.session_state:
@@ -232,9 +252,11 @@ if "input_coordinate_system" not in st.session_state:
     st.session_state.input_coordinate_system = "WGS-84"
 if "page" not in st.session_state:
     st.session_state.page = "飞行监控"
+if "obstacles" not in st.session_state:
+    st.session_state.obstacles = load_obstacles()   # 加载记忆障碍物
 
 # 标题
-st.title("🚁 无人机心跳实时可视化监控系统")
+st.title("🚁 无人机实时监控与智能航线规划系统")
 st.markdown('<span class="beijing-badge">🇨🇳 北京时间 (UTC+8)</span>', unsafe_allow_html=True)
 current_time_info = get_beijing_time_info()
 st.markdown(f"""
@@ -246,7 +268,6 @@ st.markdown(f"""
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
-    # ... (侧边栏内容与之前相同，注意引用正确的变量名)
     st.header("⚙️ 全局控制")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -263,6 +284,7 @@ with st.sidebar:
             st.session_state.map_points = []
             st.session_state.a_point = None
             st.session_state.b_point = None
+            # 注意：不清除障碍物，如需清除请在障碍物管理界面操作
     st.divider()
     st.subheader("📊 实时统计")
     sim = st.session_state.simulator
@@ -284,14 +306,13 @@ with st.sidebar:
         st.caption(f"原始: {st.session_state.a_point['original_lat']:.6f}, {st.session_state.a_point['original_lon']:.6f} ({st.session_state.a_point['original_crs']})")
     if st.session_state.b_point:
         st.caption(f"原始: {st.session_state.b_point['original_lat']:.6f}, {st.session_state.b_point['original_lon']:.6f} ({st.session_state.b_point['original_crs']})")
-    
     st.divider()
     st.subheader("⚡ 刷新设置")
     refresh_rate = st.selectbox("刷新频率（秒）", [1, 2, 3, 5], index=0)
-    
     st.divider()
     st.subheader("🧭 功能页面")
-    page = st.radio("跳转", ["飞行监控", "航线规划", "坐标系设置"], index=["飞行监控", "航线规划", "坐标系设置"].index(st.session_state.page))
+    page = st.radio("跳转", ["飞行监控", "航线规划", "障碍物管理", "坐标系设置"], 
+                    index=["飞行监控", "航线规划", "障碍物管理", "坐标系设置"].index(st.session_state.page))
     st.session_state.page = page
 
 # ==================== 自动心跳生成 ====================
@@ -307,7 +328,6 @@ if st.session_state.running:
 
 # ==================== 页面内容 ====================
 if st.session_state.page == "飞行监控":
-    # ... 飞行监控代码（与之前相同，注意 sim 已定义）
     st.header("📡 飞行监控 · 实时心跳数据")
     sim = st.session_state.simulator
     stats = sim.get_statistics()
@@ -440,11 +460,16 @@ elif st.session_state.page == "航线规划":
             st.session_state.a_point = None
             st.session_state.b_point = None
             st.success("已清除航线起终点")
+        st.divider()
+        st.subheader("⚠️ 障碍物显示开关")
+        show_obstacles = st.checkbox("在地图上显示障碍物区域", value=True)
+    
     with right_col:
         if AMAP_KEY == "你的高德Key":
             st.error("⚠️ 请先在代码中填写你的高德 Web 端 Key！")
         else:
             amap_satellite_url = f"https://webst01.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
+            # 确定地图中心
             center_lat, center_lon = 39.9042, 116.4074
             if st.session_state.a_point:
                 center_lat, center_lon = st.session_state.a_point['lat_gcj'], st.session_state.a_point['lon_gcj']
@@ -453,7 +478,10 @@ elif st.session_state.page == "航线规划":
             elif st.session_state.map_points:
                 center_lat = sum(p['lat_gcj'] for p in st.session_state.map_points) / len(st.session_state.map_points)
                 center_lon = sum(p['lon_gcj'] for p in st.session_state.map_points) / len(st.session_state.map_points)
+            
             m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=amap_satellite_url, attr='高德地图')
+            
+            # 添加标记点
             for point in st.session_state.map_points:
                 folium.Marker(
                     location=[point['lat_gcj'], point['lon_gcj']],
@@ -461,6 +489,7 @@ elif st.session_state.page == "航线规划":
                     tooltip=point['name'],
                     icon=folium.Icon(color='blue', icon='info-sign')
                 ).add_to(m)
+            # 添加 A/B 点
             if st.session_state.a_point:
                 folium.Marker(
                     location=[st.session_state.a_point['lat_gcj'], st.session_state.a_point['lon_gcj']],
@@ -475,11 +504,11 @@ elif st.session_state.page == "航线规划":
                     tooltip="B点",
                     icon=folium.Icon(color='red', icon='stop', prefix='fa')
                 ).add_to(m)
+            # 绘制航线
             if st.session_state.a_point and st.session_state.b_point:
                 line_points = [[st.session_state.a_point['lat_gcj'], st.session_state.a_point['lon_gcj']],
                                [st.session_state.b_point['lat_gcj'], st.session_state.b_point['lon_gcj']]]
                 folium.PolyLine(line_points, color="yellow", weight=5, opacity=0.8, tooltip="规划航线").add_to(m)
-                # 使用原始坐标计算距离（避免GCJ误差）
                 dist = haversine(st.session_state.a_point['original_lon'], st.session_state.a_point['original_lat'],
                                  st.session_state.b_point['original_lon'], st.session_state.b_point['original_lat'])
                 folium.map.Marker(
@@ -487,18 +516,157 @@ elif st.session_state.page == "航线规划":
                      (st.session_state.a_point['lon_gcj']+st.session_state.b_point['lon_gcj'])/2],
                     icon=folium.DivIcon(html=f'<div style="font-size:12px; font-weight:bold; color:white; background:rgba(0,0,0,0.6); padding:2px 6px; border-radius:12px;">✈️ {dist:.2f} km</div>')
                 ).add_to(m)
+            # 显示障碍物
+            if show_obstacles:
+                for obs in st.session_state.obstacles:
+                    # obs 结构: {"id": str, "name": str, "coordinates": [[lng, lat], ...], "color": str}
+                    coords = [[lat, lng] for lng, lat in obs['coordinates']]  # folium 需要 [lat, lng]
+                    folium.Polygon(
+                        locations=coords,
+                        color=obs.get('color', 'red'),
+                        weight=3,
+                        fill=True,
+                        fill_opacity=0.3,
+                        popup=obs.get('name', '障碍物'),
+                        tooltip=obs.get('name', '障碍物')
+                    ).add_to(m)
+            # 显示地图（不包含绘图控件，绘图控件放在障碍物管理页面）
             st_folium(m, width=700, height=500, key="amap_planning")
+
+elif st.session_state.page == "障碍物管理":
+    st.header("⛔ 障碍物圈选与管理（多边形）")
+    st.markdown("在地图上绘制多边形障碍物区域，支持编辑、删除、记忆保存。")
+    
+    # 左右布局：左侧列表，右侧绘图地图
+    col_left, col_right = st.columns([1, 2])
+    with col_left:
+        st.subheader("📋 障碍物列表")
+        if not st.session_state.obstacles:
+            st.info("暂无障碍物，请在右侧地图绘制多边形。")
+        else:
+            for idx, obs in enumerate(st.session_state.obstacles):
+                col1, col2, col3 = st.columns([3, 1, 1])
+                col1.write(f"**{obs['name']}** (顶点数: {len(obs['coordinates'])})")
+                if col2.button("🗑️", key=f"del_{idx}"):
+                    del st.session_state.obstacles[idx]
+                    save_obstacles(st.session_state.obstacles)
+                    st.rerun()
+                if col3.button("✏️ 重命名", key=f"rename_{idx}"):
+                    new_name = st.text_input("新名称", value=obs['name'], key=f"rename_input_{idx}")
+                    if new_name:
+                        obs['name'] = new_name
+                        save_obstacles(st.session_state.obstacles)
+                        st.rerun()
+            if st.button("🗑️ 清空所有障碍物", use_container_width=True):
+                st.session_state.obstacles = []
+                save_obstacles([])
+                st.rerun()
+        st.divider()
+        st.subheader("⚙️ 导入/导出")
+        uploaded_file = st.file_uploader("导入障碍物 JSON", type=["json"])
+        if uploaded_file:
+            try:
+                imported = json.load(uploaded_file)
+                if isinstance(imported, list):
+                    st.session_state.obstacles = imported
+                    save_obstacles(imported)
+                    st.success("导入成功！")
+                    st.rerun()
+                else:
+                    st.error("文件格式错误：需要包含障碍物列表的 JSON 数组")
+            except:
+                st.error("无效的 JSON 文件")
+        if st.button("📥 导出障碍物数据"):
+            json_str = json.dumps(st.session_state.obstacles, ensure_ascii=False, indent=2)
+            st.download_button("下载 JSON", data=json_str, file_name="obstacles.json", mime="application/json")
+    
+    with col_right:
+        if AMAP_KEY == "你的高德Key":
+            st.error("⚠️ 请先在代码中填写你的高德 Web 端 Key！")
+        else:
+            amap_satellite_url = f"https://webst01.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
+            # 地图中心：优先使用 A/B 点或第一个障碍物中心
+            center_lat, center_lon = 39.9042, 116.4074
+            if st.session_state.a_point:
+                center_lat, center_lon = st.session_state.a_point['lat_gcj'], st.session_state.a_point['lon_gcj']
+            elif st.session_state.b_point:
+                center_lat, center_lon = st.session_state.b_point['lat_gcj'], st.session_state.b_point['lon_gcj']
+            elif st.session_state.obstacles:
+                # 计算所有障碍物点的平均中心
+                all_coords = []
+                for obs in st.session_state.obstacles:
+                    all_coords.extend(obs['coordinates'])
+                if all_coords:
+                    center_lon = sum(c[0] for c in all_coords) / len(all_coords)
+                    center_lat = sum(c[1] for c in all_coords) / len(all_coords)
+            
+            # 创建地图，添加 Draw 控件
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=amap_satellite_url, attr='高德地图')
+            
+            # 显示已有障碍物
+            for obs in st.session_state.obstacles:
+                coords = [[lat, lng] for lng, lat in obs['coordinates']]
+                folium.Polygon(
+                    locations=coords,
+                    color=obs.get('color', 'red'),
+                    weight=3,
+                    fill=True,
+                    fill_opacity=0.3,
+                    popup=obs.get('name', '障碍物'),
+                    tooltip=obs.get('name', '障碍物')
+                ).add_to(m)
+            
+            # 添加绘图控件（允许绘制多边形、编辑、删除）
+            draw = Draw(
+                draw_options={
+                    'polygon': {'allowIntersection': False, 'showArea': True, 'shapeOptions': {'color': '#ff0000'}},
+                    'polyline': False,
+                    'rectangle': False,
+                    'circle': False,
+                    'marker': False,
+                    'circlemarker': False
+                },
+                edit_options={'edit': True, 'remove': True}
+            )
+            draw.add_to(m)
+            
+            # 获取绘图结果
+            output = st_folium(m, width=700, height=500, key="obstacle_draw")
+            
+            # 处理新绘制的多边形
+            if output and 'last_active_drawing' in output and output['last_active_drawing']:
+                drawing = output['last_active_drawing']
+                if drawing and drawing.get('geometry', {}).get('type') == 'Polygon':
+                    # 提取坐标（注意 folium.Draw 返回的坐标是 [[lng, lat], ...]）
+                    coords = drawing['geometry']['coordinates'][0]  # 外环
+                    # 标准化为 [[lng, lat], ...]
+                    coords = [[c[0], c[1]] for c in coords]
+                    # 生成唯一ID
+                    new_id = str(int(time.time() * 1000))
+                    new_name = f"障碍物_{len(st.session_state.obstacles)+1}"
+                    st.session_state.obstacles.append({
+                        "id": new_id,
+                        "name": new_name,
+                        "coordinates": coords,
+                        "color": "red"
+                    })
+                    save_obstacles(st.session_state.obstacles)
+                    st.success(f"已添加障碍物: {new_name}")
+                    st.rerun()
+            
+            # 提示
+            st.info("✏️ 使用左侧绘图工具栏绘制多边形，绘制完成后自动保存。可点击多边形编辑或删除。")
 
 elif st.session_state.page == "坐标系设置":
     st.header("🌐 坐标系设置")
-    st.markdown("设置**手动添加标记点 / A/B点**时，输入的坐标属于哪种坐标系。高德地图使用 **GCJ-02** 坐标系，系统会自动转换。")
+    st.markdown("设置**手动添加标记点 / A/B点**时，输入的坐标属于哪种坐标系。高德地图使用 **GCJ-02** 坐标系，系统会自动转换。障碍物数据存储为 GCJ-02。")
     crs = st.radio("输入坐标系", ["WGS-84", "GCJ-02 (高德/百度)"], index=0 if st.session_state.input_coordinate_system == "WGS-84" else 1)
     if crs == "WGS-84":
         st.session_state.input_coordinate_system = "WGS-84"
     else:
         st.session_state.input_coordinate_system = "GCJ-02"
     st.success(f"当前输入坐标系: **{st.session_state.input_coordinate_system}**")
-    st.info("💡 说明：\n- GPS/北斗通常输出 WGS-84 坐标，需转换为 GCJ-02 才能在高德地图上准确定位。\n- 如果你直接从高德地图获取坐标，请选择 GCJ-02。\n- 地图底图、标记点显示均使用 GCJ-02。")
+    st.info("💡 说明：\n- GPS/北斗通常输出 WGS-84 坐标，需转换为 GCJ-02 才能在高德地图上准确定位。\n- 如果你直接从高德地图获取坐标，请选择 GCJ-02。\n- 障碍物多边形使用 GCJ-02 存储，无需额外转换。")
     st.divider()
     st.subheader("坐标转换测试")
     test_lon = st.number_input("经度", value=116.397128, format="%.6f")
