@@ -105,12 +105,6 @@ def line_polygon_intersect(line_start, line_end, polygon):
         return True
     return False
 
-def get_polygon_center(polygon):
-    """计算多边形中心点"""
-    lng_sum = sum(p[0] for p in polygon)
-    lat_sum = sum(p[1] for p in polygon)
-    return lng_sum/len(polygon), lat_sum/len(polygon)
-
 def get_polygon_bounds(polygon):
     """获取多边形边界"""
     min_x = min(p[0] for p in polygon)
@@ -119,33 +113,10 @@ def get_polygon_bounds(polygon):
     max_y = max(p[1] for p in polygon)
     return min_x, min_y, max_x, max_y
 
-def point_to_segment_distance(point, seg_start, seg_end):
-    """计算点到线段的最短距离（公里）"""
-    x0, y0 = point
-    x1, y1 = seg_start
-    x2, y2 = seg_end
-    
-    # 线段长度平方
-    dx = x2 - x1
-    dy = y2 - y1
-    if dx == 0 and dy == 0:
-        return haversine(x0, y0, x1, y1)
-    
-    # 投影参数 t
-    t = ((x0 - x1) * dx + (y0 - y1) * dy) / (dx * dx + dy * dy)
-    t = max(0, min(1, t))
-    
-    # 投影点
-    proj_x = x1 + t * dx
-    proj_y = y1 + t * dy
-    
-    return haversine(x0, y0, proj_x, proj_y)
-
 # ==================== 智能避障算法（纯几何，无外部依赖） ====================
-def find_avoidance_path_advanced(start, end, obstacles, flight_altitude, safe_distance_km=0.5):
+def find_avoidance_path(start, end, obstacles, flight_altitude, safe_distance_km=0.5):
     """
-    高级避障算法：找到真正避开障碍物的路径
-    使用纯几何计算，无需 shapely
+    避障算法：找到避开障碍物的路径
     """
     # 收集需要避让的障碍物（高度高于飞行高度且与航线相交）
     blocking_obstacles = []
@@ -159,14 +130,13 @@ def find_avoidance_path_advanced(start, end, obstacles, flight_altitude, safe_di
     if not blocking_obstacles:
         return [(start, end)], False
     
-    # 合并所有需要避让的障碍物的边界
+    # 计算所有障碍物的整体边界
     all_bounds = []
     for obs in blocking_obstacles:
         polygon = [(c[0], c[1]) for c in obs['coordinates']]
         min_x, min_y, max_x, max_y = get_polygon_bounds(polygon)
         all_bounds.append((min_x, min_y, max_x, max_y))
     
-    # 计算整体边界
     global_min_x = min(b[0] for b in all_bounds)
     global_min_y = min(b[1] for b in all_bounds)
     global_max_x = max(b[2] for b in all_bounds)
@@ -188,13 +158,13 @@ def find_avoidance_path_advanced(start, end, obstacles, flight_altitude, safe_di
     perp_x = -uy
     perp_y = ux
     
-    # 计算障碍物中心在航线上的投影
+    # 计算障碍物中心
     center_x = (global_min_x + global_max_x) / 2
     center_y = (global_min_y + global_max_y) / 2
     
     # 投影参数 t
     t = ((center_x - start[0]) * ux + (center_y - start[1]) * uy) / length
-    t = max(0.2, min(0.8, t))  # 限制在航线中间区域
+    t = max(0.2, min(0.8, t))
     
     # 航线上的投影点
     proj_x = start[0] + ux * t * length
@@ -208,7 +178,7 @@ def find_avoidance_path_advanced(start, end, obstacles, flight_altitude, safe_di
     waypoint_left = (proj_x + perp_x * offset_deg, proj_y + perp_y * offset_deg)
     waypoint_right = (proj_x - perp_x * offset_deg, proj_y - perp_y * offset_deg)
     
-    # 验证绕行点是否在障碍物内，并选择更好的绕行点
+    # 验证绕行点是否在障碍物内
     def is_point_in_any_obstacle(point):
         for obs in blocking_obstacles:
             polygon = [(c[0], c[1]) for c in obs['coordinates']]
@@ -237,7 +207,7 @@ def find_avoidance_path_advanced(start, end, obstacles, flight_altitude, safe_di
         (waypoint, end)
     ]
     
-    # 验证路径是否与障碍物相交，如果相交则添加额外的中间点
+    # 验证路径是否与障碍物相交
     def path_intersects_obstacles(segments_list):
         for seg_start, seg_end in segments_list:
             for obs in blocking_obstacles:
@@ -251,7 +221,6 @@ def find_avoidance_path_advanced(start, end, obstacles, flight_altitude, safe_di
         mid_x = (waypoint[0] + end[0]) / 2
         mid_y = (waypoint[1] + end[1]) / 2
         
-        # 计算从绕行点到终点的方向
         dx2 = end[0] - waypoint[0]
         dy2 = end[1] - waypoint[1]
         len2 = sqrt(dx2*dx2 + dy2*dy2)
@@ -734,7 +703,7 @@ elif st.session_state.page == "航线规划":
             # 计算绕行路径
             avoidance_path = None
             if avoidance_enabled and collision_3d:
-                segments, has_avoidance = find_avoidance_path_advanced(
+                segments, has_avoidance = find_avoidance_path(
                     start_point, end_point, 
                     st.session_state.obstacles, 
                     st.session_state.flight_altitude,
@@ -822,7 +791,7 @@ elif st.session_state.page == "航线规划":
                 
                 if need_avoidance:
                     # 绘制绕行路径
-                    segments, _ = find_avoidance_path_advanced(
+                    segments, _ = find_avoidance_path(
                         start_point, end_point,
                         st.session_state.obstacles,
                         st.session_state.flight_altitude,
