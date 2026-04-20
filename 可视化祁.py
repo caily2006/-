@@ -1,3 +1,69 @@
+# ==================== 页面内容 ====================
+if st.session_state.page == "飞行监控":
+    st.header("📡 飞行监控 · 实时心跳数据")
+    sim = st.session_state.simulator
+    stats = sim.get_statistics()
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("📊 成功接收", stats['received_count'])
+    c2.metric("⚠️ 超时事件", len(sim.timeout_events))
+    c3.metric("⏱️ 平均延迟", f"{stats['avg_delay']:.1f} ms", delta=f"{stats['min_delay']:.0f}-{stats['max_delay']:.0f}ms")
+    c4.metric("📉 丢包率", f"{stats['packet_loss_rate']:.1f}%")
+    c5.metric("⏰ 运行时长", f"{int((time.time()-sim.start_time)//60)}分{int((time.time()-sim.start_time)%60)}秒")
+    st.markdown("---")
+    try:
+        seq, delay, rtimes = sim.get_recent_data(30)
+        fig = create_heartbeat_charts(seq, delay, rtimes, len(sim.timeout_events), sim.timeout_events)
+        st.pyplot(fig)
+        plt.close(fig)
+    except Exception as e:
+        st.error(f"图表错误: {e}")
+    col_left, col_right = st.columns(2)
+    with col_left:
+        st.subheader("📡 最新心跳信息")
+        if sim.heartbeat_history:
+            latest = sim.heartbeat_history[-1]
+            st.markdown(f"- **序号**: {latest.get('sequence', 'N/A')}")
+            st.markdown(f"- **延迟**: {latest.get('delay_ms', 0):.1f} ms")
+            st.markdown(f"- **接收时间**: {format_beijing_time(latest.get('receive_time'))}")
+            delay_val = latest.get('delay_ms', 0)
+            if delay_val < 200:
+                st.success("✅ 延迟状态: 优秀 (<200ms)")
+            elif delay_val < 400:
+                st.warning("⚠️ 延迟状态: 良好 (200-400ms)")
+            else:
+                st.error("🔴 延迟状态: 较差 (>400ms)")
+        else:
+            st.info("等待数据...")
+    with col_right:
+        st.subheader("⚠️ 最近超时事件")
+        if sim.timeout_events:
+            df_timeout = pd.DataFrame([{
+                "时间": e['time'].strftime('%H:%M:%S'),
+                "持续": f"{e['duration']:.1f}秒"
+            } for e in list(sim.timeout_events)[-5:] if e and isinstance(e, dict)])
+            st.dataframe(df_timeout, use_container_width=True)
+            now = sim.get_beijing_time()
+            if any((now - e['time']).total_seconds() < 10 for e in sim.timeout_events if e and 'time' in e):
+                st.markdown('<p class="warning-text">⚠️ 最近10秒内有超时发生！</p>', unsafe_allow_html=True)
+        else:
+            st.success("✅ 无超时事件")
+    st.subheader("📊 传输统计")
+    if sim.heartbeat_history:
+        delays_hist = [r['delay_ms'] for r in list(sim.heartbeat_history)[-50:] if isinstance(r, dict) and 'delay_ms' in r]
+        if delays_hist:
+            fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+            ax1.hist(delays_hist, bins=20, color='skyblue', edgecolor='black')
+            ax1.axvline(x=400, color='red', linestyle='--', label='阈值400ms')
+            ax1.set_xlabel('延迟 (ms)'); ax1.set_ylabel('频次'); ax1.set_title('延迟分布'); ax1.legend()
+            ax2.plot(rtimes[-50:], delays_hist, 'b-', alpha=0.7)
+            ax2.scatter(rtimes[-50:], delays_hist, c='red', s=30, alpha=0.5)
+            ax2.set_xlabel('接收时间（北京时间）'); ax2.set_ylabel('延迟 (ms)'); ax2.set_title('延迟变化趋势')
+            ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
+            plt.tight_layout()
+            st.pyplot(fig2)
+            plt.close(fig2)
+
 elif st.session_state.page == "航线规划":
     st.header("🗺️ 航线规划 · 集成障碍物圈选与碰撞检测")
     
@@ -288,3 +354,77 @@ elif st.session_state.page == "航线规划":
                 save_obstacles(st.session_state.obstacles)
                 st.success(f"已添加障碍物: {new_name} (默认高度 100m，可在管理页面修改)")
                 st.rerun()
+
+elif st.session_state.page == "障碍物管理":
+    st.header("⛔ 障碍物管理 · 列表与高级操作")
+    col_left, col_right = st.columns([1, 2])
+    with col_left:
+        st.subheader("📋 障碍物列表")
+        if not st.session_state.obstacles:
+            st.info("暂无障碍物，请前往「航线规划」页面绘制多边形，或点击下方导入。")
+        else:
+            for idx, obs in enumerate(st.session_state.obstacles):
+                with st.expander(f"**{obs['name']}** (顶点数: {len(obs['coordinates'])})"):
+                    # 高度编辑
+                    new_height = st.number_input("高度 (米)", value=float(obs.get('height', 100)), step=10.0, key=f"height_{idx}")
+                    if new_height != obs.get('height', 100):
+                        obs['height'] = new_height
+                        save_obstacles(st.session_state.obstacles)
+                        st.success("高度已更新")
+                    # 重命名
+                    new_name = st.text_input("名称", value=obs['name'], key=f"rename_{idx}")
+                    if new_name != obs['name']:
+                        obs['name'] = new_name
+                        save_obstacles(st.session_state.obstacles)
+                        st.success("名称已更新")
+                    if st.button("🗑️ 删除", key=f"del_{idx}"):
+                        del st.session_state.obstacles[idx]
+                        save_obstacles(st.session_state.obstacles)
+                        st.rerun()
+        if st.button("🗑️ 清空所有障碍物", use_container_width=True):
+            st.session_state.obstacles = []
+            save_obstacles([])
+            st.rerun()
+        st.divider()
+        st.subheader("⚙️ 导入/导出")
+        uploaded_file = st.file_uploader("导入障碍物 JSON", type=["json"])
+        if uploaded_file:
+            try:
+                imported = json.load(uploaded_file)
+                if isinstance(imported, list):
+                    # 确保每个障碍物有 height 字段
+                    for obs in imported:
+                        if 'height' not in obs:
+                            obs['height'] = 100.0
+                    st.session_state.obstacles = imported
+                    save_obstacles(imported)
+                    st.success("导入成功！")
+                    st.rerun()
+                else:
+                    st.error("文件格式错误：需要包含障碍物列表的 JSON 数组")
+            except:
+                st.error("无效的 JSON 文件")
+        if st.button("📥 导出障碍物数据"):
+            json_str = json.dumps(st.session_state.obstacles, ensure_ascii=False, indent=2)
+            st.download_button("下载 JSON", data=json_str, file_name="obstacles.json", mime="application/json")
+    
+    with col_right:
+        st.info("📌 提示：要绘制新障碍物，请前往「航线规划」页面，使用地图上的绘图工具直接绘制。本页面用于管理现有障碍物的高度、名称和删除操作。")
+
+elif st.session_state.page == "坐标系设置":
+    st.header("🌐 坐标系设置")
+    st.markdown("设置**手动添加标记点 / A/B点**时，输入的坐标属于哪种坐标系。高德地图使用 **GCJ-02** 坐标系，系统会自动转换。障碍物数据存储为 GCJ-02。")
+    crs = st.radio("输入坐标系", ["WGS-84", "GCJ-02 (高德/百度)"], index=0 if st.session_state.input_coordinate_system == "WGS-84" else 1)
+    if crs == "WGS-84":
+        st.session_state.input_coordinate_system = "WGS-84"
+    else:
+        st.session_state.input_coordinate_system = "GCJ-02"
+    st.success(f"当前输入坐标系: **{st.session_state.input_coordinate_system}**")
+    st.info("💡 说明：\n- GPS/北斗通常输出 WGS-84 坐标，需转换为 GCJ-02 才能在高德地图上准确定位。\n- 如果你直接从高德地图获取坐标，请选择 GCJ-02。\n- 障碍物多边形使用 GCJ-02 存储，无需额外转换。")
+    st.divider()
+    st.subheader("坐标转换测试")
+    test_lon = st.number_input("经度", value=116.397128, format="%.6f")
+    test_lat = st.number_input("纬度", value=39.916527, format="%.6f")
+    if st.button("WGS-84 → GCJ-02"):
+        gcj_lon, gcj_lat = wgs84_to_gcj02(test_lon, test_lat)
+        st.write(f"GCJ-02 坐标: {gcj_lat:.6f}, {gcj_lon:.6f}")
