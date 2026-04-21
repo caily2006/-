@@ -114,9 +114,10 @@ def get_polygon_bounds(polygon):
     return min_x, min_y, max_x, max_y
 
 # ==================== 智能避障算法（纯几何，无外部依赖） ====================
-def find_avoidance_path(start, end, obstacles, flight_altitude, safe_distance_km=0.5):
+def find_avoidance_path(start, end, obstacles, flight_altitude, safe_distance_km=0.05):
     """
     避障算法：找到避开障碍物的路径
+    safe_distance_km: 安全距离（公里），默认50米 = 0.05公里
     """
     # 收集需要避让的障碍物（高度高于飞行高度且与航线相交）
     blocking_obstacles = []
@@ -170,9 +171,9 @@ def find_avoidance_path(start, end, obstacles, flight_altitude, safe_distance_km
     proj_x = start[0] + ux * t * length
     proj_y = start[1] + uy * t * length
     
-    # 计算安全偏移（度数）
+    # 计算安全偏移（度数）- 将公里转换为度数
     lat_center = (start[1] + end[1]) / 2
-    offset_deg = safe_distance_km / 111.0
+    offset_deg = safe_distance_km / 111.0  # 1度纬度 ≈ 111公里
     
     # 生成左右两个绕行点
     waypoint_left = (proj_x + perp_x * offset_deg, proj_y + perp_y * offset_deg)
@@ -443,7 +444,7 @@ if "map_style" not in st.session_state:
 if "avoidance_enabled" not in st.session_state:
     st.session_state.avoidance_enabled = True
 if "safe_distance" not in st.session_state:
-    st.session_state.safe_distance = 0.5
+    st.session_state.safe_distance = 0.05  # 默认50米
 
 st.title("🚁 无人机实时监控与智能航线规划系统")
 st.markdown('<span class="beijing-badge">🇨🇳 北京时间 (UTC+8)</span>', unsafe_allow_html=True)
@@ -663,9 +664,16 @@ elif st.session_state.page == "航线规划":
         st.session_state.avoidance_enabled = avoidance_enabled
         
         if avoidance_enabled:
-            safe_distance = st.slider("绕行安全距离 (公里)", min_value=0.1, max_value=2.0, value=st.session_state.safe_distance, step=0.1)
-            st.session_state.safe_distance = safe_distance
-            st.caption("当障碍物高度高于飞行高度时，自动规划绕行路径（路径会真正避开障碍物）")
+            # 安全距离：10-500米，步长10米
+            safe_distance_m = st.slider(
+                "绕行安全距离 (米)", 
+                min_value=10, 
+                max_value=500, 
+                value=int(st.session_state.safe_distance * 1000),
+                step=10
+            )
+            st.session_state.safe_distance = safe_distance_m / 1000.0
+            st.caption(f"当前安全距离: {safe_distance_m} 米，当障碍物高度高于飞行高度时，自动规划绕行路径")
         
         st.divider()
         st.subheader("🗺️ 地图底图样式")
@@ -711,13 +719,13 @@ elif st.session_state.page == "航线规划":
                 )
                 if has_avoidance:
                     avoidance_path = segments
-                    st.markdown(f'<div class="info-text">🔄 智能避障已启用：检测到 {len(blocking_obstacles)} 个障碍物需要绕行，已自动规划绕行路径（路径已避开障碍物）。</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="info-text">🔄 智能避障已启用：检测到 {len(blocking_obstacles)} 个障碍物需要绕行，已自动规划绕行路径（绕行距离 {st.session_state.safe_distance*1000:.0f} 米）。</div>', unsafe_allow_html=True)
             
             # 显示碰撞检测结果
             if collision_3d and not avoidance_enabled:
                 st.markdown(f'<div class="danger-text">⚠️ 危险：规划航线与 {len(blocking_obstacles)} 个障碍物相交且飞行高度不足！请启用智能避障或调整飞行高度。</div>', unsafe_allow_html=True)
             elif collision_3d and avoidance_enabled:
-                st.markdown(f'<div class="warning-text-yellow">⚠️ 警告：原航线与障碍物相交，已启用智能避障，正在使用绕行路径。</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="warning-text-yellow">⚠️ 警告：原航线与障碍物相交，已启用智能避障，正在使用绕行路径（安全距离 {st.session_state.safe_distance*1000:.0f} 米）。</div>', unsafe_allow_html=True)
             elif collision_2d:
                 st.markdown(f'<div class="warning-text-yellow">⚠️ 警告：规划航线与障碍物区域相交，但飞行高度 {st.session_state.flight_altitude:.0f}m 高于障碍物高度，可通过。</div>', unsafe_allow_html=True)
             else:
@@ -964,6 +972,7 @@ elif st.session_state.page == "障碍物管理":
         📌 **智能避障功能说明（纯几何实现，无需额外库）**
         
         - **启用智能避障**：在「航线规划」页面勾选"启用智能避障绕行"
+        - **安全距离范围**：10-500 米（步长 10 米）
         - **工作原理**：当障碍物高度 ≥ 飞行高度且航线与之相交时，自动计算绕行路径
         - **绕行策略**：
           1. 检测航线上的障碍物投影区间
@@ -971,7 +980,6 @@ elif st.session_state.page == "障碍物管理":
           3. 验证绕行点是否在障碍物内，如在其内部则向外延伸
           4. 选择距离终点更近的绕行路径
           5. 可选：添加额外绕行点确保完全避开障碍物
-        - **安全距离**：可调整绕行点与障碍物的安全距离（0.1-2.0公里）
         
         **可视化说明**
         - 🟡 **黄色线**：原始直线航线（无障碍或可跨越）
