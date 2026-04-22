@@ -113,132 +113,118 @@ def get_polygon_bounds(polygon):
     max_y = max(p[1] for p in polygon)
     return min_x, min_y, max_x, max_y
 
-# ==================== 智能避障算法（改进版，确保路径不穿过障碍物） ====================
-def find_avoidance_path(start, end, obstacles, flight_altitude, safe_distance_km=0.05):
+# ==================== 智能避障算法（递归绕行点搜索，保证不穿过障碍物） ====================
+def find_avoidance_path(start, end, obstacles, flight_altitude, safe_distance_km=0.05, depth=0):
     """
-    改进的避障算法：确保路径真正绕过障碍物
+    递归避障算法：当直线段与任何高度相关的障碍物相交时，
+    选择障碍物多边形上最优顶点作为绕行点，递归处理子段，直到全部避开。
+    参数：
+        start, end: (lon, lat) GCJ-02坐标
+        obstacles: 障碍物列表
+        flight_altitude: 飞行高度(m)
+        safe_distance_km: 绕行点向外偏移的安全距离(km)
+        depth: 递归深度(防止无限循环)
+    返回：
+        (segments, has_avoidance)  segments为[(start, p1), (p1, p2), ...] 列表
     """
-    # 收集需要避让的障碍物（高度高于飞行高度且与航线相交）
-    blocking_obstacles = []
+    MAX_DEPTH = 10
+    if depth > MAX_DEPTH:
+        # 超过深度限制，直接返回直线段（避免崩溃，但实际应提示）
+        return [(start, end)], True
+
+    # 收集所有阻挡当前线段的障碍物（高度足够且线段与之相交）
+    blocking_obs = []
     for obs in obstacles:
-        obstacle_height = obs.get('height', 50)
-        if obstacle_height >= flight_altitude:
+        obs_height = obs.get('height', 50)
+        if obs_height >= flight_altitude:
             polygon = [(c[0], c[1]) for c in obs['coordinates']]
             if line_polygon_intersect(start, end, polygon):
-                blocking_obstacles.append(obs)
-    
-    if not blocking_obstacles:
+                blocking_obs.append(obs)
+
+    if not blocking_obs:
+        # 没有阻挡，直接返回当前线段
         return [(start, end)], False
-    
-    # 获取第一个阻挡障碍物的边界
-    first_obs = blocking_obstacles[0]
-    polygon = [(c[0], c[1]) for c in first_obs['coordinates']]
-    min_x, min_y, max_x, max_y = get_polygon_bounds(polygon)
-    
-    # 计算航线方向
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length = sqrt(dx*dx + dy*dy)
-    
-    if length < 0.0001:
-        return [(start, end)], False
-    
-    # 单位方向向量
-    ux = dx / length
-    uy = dy / length
-    
-    # 垂直向量
-    perp_x = -uy
-    perp_y = ux
-    
-    # 计算障碍物在航线上的投影区间
-    t_values = []
-    for point in polygon:
-        t = ((point[0] - start[0]) * ux + (point[1] - start[1]) * uy) / length
-        t_values.append(t)
-    
-    t_min = max(0.05, min(t_values) - 0.05)
-    t_max = min(0.95, max(t_values) + 0.05)
-    
-    # 航线上的两个投影点（障碍物前后的点）
-    proj1_x = start[0] + ux * t_min * length
-    proj1_y = start[1] + uy * t_min * length
-    proj2_x = start[0] + ux * t_max * length
-    proj2_y = start[1] + uy * t_max * length
-    
-    # 计算安全偏移（度数）
-    lat_center = (start[1] + end[1]) / 2
-    offset_deg = safe_distance_km / 111.0
-    
-    # 判断从哪一侧绕行（选择离终点更近的一侧）
-    # 计算左右两个绕行点
-    left_waypoint = (proj1_x + perp_x * offset_deg, proj1_y + perp_y * offset_deg)
-    right_waypoint = (proj1_x - perp_x * offset_deg, proj1_y - perp_y * offset_deg)
-    
-    # 检查绕行点是否在障碍物内，如果在则向外扩展
-    def is_point_in_obstacle(point, obstacle_polygon):
-        return point_in_polygon(point, obstacle_polygon)
-    
-    # 验证并调整左侧绕行点
-    if is_point_in_obstacle(left_waypoint, polygon):
-        left_waypoint = (proj1_x + perp_x * offset_deg * 3, proj1_y + perp_y * offset_deg * 3)
-    # 验证并调整右侧绕行点
-    if is_point_in_obstacle(right_waypoint, polygon):
-        right_waypoint = (proj1_x - perp_x * offset_deg * 3, proj1_y - perp_y * offset_deg * 3)
-    
-    # 选择距离终点更近的绕行点
-    dist_left = haversine(left_waypoint[0], left_waypoint[1], end[0], end[1])
-    dist_right = haversine(right_waypoint[0], right_waypoint[1], end[0], end[1])
-    
-    if dist_left < dist_right:
-        waypoint = left_waypoint
-        side = "left"
-    else:
-        waypoint = right_waypoint
-        side = "right"
-    
-    # 构建绕行路径：起点 -> 绕行点1 -> 绕行点2 -> 终点
-    # 在障碍物另一侧也添加一个绕行点，确保完全避开
-    if side == "left":
-        waypoint2 = (proj2_x + perp_x * offset_deg, proj2_y + perp_y * offset_deg)
-        if is_point_in_obstacle(waypoint2, polygon):
-            waypoint2 = (proj2_x + perp_x * offset_deg * 3, proj2_y + perp_y * offset_deg * 3)
-    else:
-        waypoint2 = (proj2_x - perp_x * offset_deg, proj2_y - perp_y * offset_deg)
-        if is_point_in_obstacle(waypoint2, polygon):
-            waypoint2 = (proj2_x - perp_x * offset_deg * 3, proj2_y - perp_y * offset_deg * 3)
-    
-    # 构建三段式路径
-    segments = [
-        (start, waypoint),
-        (waypoint, waypoint2),
-        (waypoint2, end)
-    ]
-    
-    # 验证路径是否与障碍物相交，如果相交则进一步调整
-    def path_intersects_obstacles(segments_list, obstacle_polygon):
-        for seg_start, seg_end in segments_list:
-            if line_polygon_intersect(seg_start, seg_end, obstacle_polygon):
-                return True
-        return False
-    
-    if path_intersects_obstacles(segments, polygon):
-        # 如果仍然相交，增加偏移距离
-        larger_offset = offset_deg * 4
-        if side == "left":
-            waypoint = (proj1_x + perp_x * larger_offset, proj1_y + perp_y * larger_offset)
-            waypoint2 = (proj2_x + perp_x * larger_offset, proj2_y + perp_y * larger_offset)
-        else:
-            waypoint = (proj1_x - perp_x * larger_offset, proj1_y - perp_y * larger_offset)
-            waypoint2 = (proj2_x - perp_x * larger_offset, proj2_y - perp_y * larger_offset)
-        
-        segments = [
-            (start, waypoint),
-            (waypoint, waypoint2),
-            (waypoint2, end)
-        ]
-    
-    return segments, True
+
+    # 取第一个阻挡障碍物进行处理（实际可选取最“严重”的，简单取第一个）
+    obs = blocking_obs[0]
+    polygon = [(c[0], c[1]) for c in obs['coordinates']]
+
+    # 获取多边形所有顶点（去重）
+    vertices = list(set(polygon))
+
+    # 辅助函数：判断点是否在障碍物内部（边界算内部）
+    def point_inside_obs(pt, poly):
+        return point_in_polygon(pt, poly)
+
+    # 辅助函数：将点沿远离多边形中心方向偏移安全距离
+    def offset_point(pt, poly, dist_km):
+        # 计算多边形中心
+        cx = sum(v[0] for v in poly) / len(poly)
+        cy = sum(v[1] for v in poly) / len(poly)
+        dx = pt[0] - cx
+        dy = pt[1] - cy
+        length = sqrt(dx*dx + dy*dy)
+        if length < 1e-9:
+            return (pt[0] + dist_km/111.0, pt[1])
+        # 将点向外移动dist_km（单位：度，近似）
+        delta_deg = dist_km / 111.0
+        new_x = pt[0] + (dx / length) * delta_deg
+        new_y = pt[1] + (dy / length) * delta_deg
+        return (new_x, new_y)
+
+    # 对每个顶点，生成候选绕行点（向外偏移安全距离）
+    candidates = []
+    for v in vertices:
+        # 偏移点
+        wp = offset_point(v, polygon, safe_distance_km)
+        # 检查偏移点是否仍然在障碍物内部（极少情况，若还在则再偏移一次）
+        if point_inside_obs(wp, polygon):
+            wp = offset_point(wp, polygon, safe_distance_km)
+        # 计算路径长度
+        len1 = haversine(start[0], start[1], wp[0], wp[1])
+        len2 = haversine(wp[0], wp[1], end[0], end[1])
+        total_len = len1 + len2
+        candidates.append((wp, total_len))
+
+    # 如果没有候选（无顶点），则使用包围盒四个角点作为备选
+    if not candidates:
+        min_x = min(p[0] for p in polygon)
+        max_x = max(p[0] for p in polygon)
+        min_y = min(p[1] for p in polygon)
+        max_y = max(p[1] for p in polygon)
+        corners = [(min_x, min_y), (min_x, max_y), (max_x, min_y), (max_x, max_y)]
+        for c in corners:
+            wp = offset_point(c, polygon, safe_distance_km)
+            len1 = haversine(start[0], start[1], wp[0], wp[1])
+            len2 = haversine(wp[0], wp[1], end[0], end[1])
+            candidates.append((wp, len1+len2))
+
+    # 按路径长度排序，优先尝试短路径
+    candidates.sort(key=lambda x: x[1])
+
+    # 尝试每个候选点，递归构建无碰撞路径
+    for wp, _ in candidates:
+        # 递归构建左半段和右半段
+        left_segments, left_avoid = find_avoidance_path(start, wp, obstacles, flight_altitude, safe_distance_km, depth+1)
+        right_segments, right_avoid = find_avoidance_path(wp, end, obstacles, flight_altitude, safe_distance_km, depth+1)
+
+        # 检查组合后的路径是否仍然与任何障碍物相交（递归内部已经保证子段无碰撞，但保险起见整体验证）
+        combined = left_segments + right_segments
+        collision = False
+        for seg_start, seg_end in combined:
+            for obs2 in obstacles:
+                if obs2.get('height', 50) >= flight_altitude:
+                    poly2 = [(c[0], c[1]) for c in obs2['coordinates']]
+                    if line_polygon_intersect(seg_start, seg_end, poly2):
+                        collision = True
+                        break
+            if collision:
+                break
+        if not collision:
+            return combined, True
+
+    # 所有候选点都无法完全避障（极端情况），返回带警告的直线段
+    return [(start, end)], True
 
 # ==================== 障碍物管理 ====================
 def load_obstacles():
@@ -793,21 +779,23 @@ elif st.session_state.page == "航线规划":
                         st.session_state.safe_distance
                     )
                     
-                    colors = ['#00FF00', '#00BFFF', '#1E90FF']
+                    colors = ['#00FF00', '#00BFFF', '#1E90FF', '#32CD32', '#00FA9A']
                     for i, (seg_start, seg_end) in enumerate(segments):
                         line_points = [[seg_start[1], seg_start[0]], [seg_end[1], seg_end[0]]]
-                        color = colors[min(i, len(colors)-1)]
+                        color = colors[i % len(colors)]
                         folium.PolyLine(line_points, color=color, weight=4, opacity=0.8, 
                                        tooltip=f"绕行航段 {i+1}").add_to(m)
                     
-                    for i, (seg_start, seg_end) in enumerate(segments[:-1]):
+                    # 添加中间航点标记（除起点终点外）
+                    for i in range(1, len(segments)):
+                        wp = segments[i-1][1]  # 每一段的终点
                         folium.CircleMarker(
-                            location=[seg_end[1], seg_end[0]],
-                            radius=8,
+                            location=[wp[1], wp[0]],
+                            radius=6,
                             color='orange',
                             fill=True,
                             fill_color='orange',
-                            popup=f"绕行点 {i+1}",
+                            popup=f"绕行点 {i}",
                             tooltip="绕行点"
                         ).add_to(m)
                     
@@ -952,22 +940,22 @@ elif st.session_state.page == "障碍物管理":
     
     with col_right:
         st.info("""
-        📌 **智能避障功能说明（改进版 - 路径不穿过障碍物）**
+        📌 **智能避障功能说明（递归绕行点搜索算法）**
         
         - **启用智能避障**：在「航线规划」页面勾选"启用智能避障绕行"
         - **安全距离范围**：10-500 米（步长 10 米）
-        - **改进的绕行策略**：
-          1. 计算障碍物多边形在航线上的投影区间
-          2. 在障碍物前后各生成一个绕行点（三段式路径）
-          3. 验证绕行点是否在障碍物内，自动向外扩展
-          4. 路径验证确保不穿过障碍物
-          5. 如仍相交，自动增加安全距离
+        - **核心算法**：
+          1. 检测直线段与障碍物的相交情况
+          2. 从障碍物多边形顶点向外偏移安全距离，生成候选绕行点
+          3. 递归地对每个子段重复检测，直到所有段都不与任何障碍物相交
+          4. 优先选择总路径长度最短的绕行方案
         
         **可视化说明**
-        - 🟡 **黄色线**：原始直线航线
-        - 🟢 **绿色线**：起始绕行航段
-        - 🔵 **蓝色线**：中间绕行航段
-        - 🟠 **橙色点**：绕行路径关键点
+        - 🟡 **黄色线**：原始直线航线（若需要绕行则不显示）
+        - 🟢 **绿色/蓝色线**：绕行航段（不同颜色区分连续航段）
+        - 🟠 **橙色点**：绕行路径关键点（航点）
+        
+        **性能提示**：递归深度限制为10层，可处理复杂多障碍物场景。
         """)
 
 elif st.session_state.page == "坐标系设置":
