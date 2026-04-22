@@ -18,9 +18,9 @@ from math import radians, sin, cos, sqrt, asin, pi, atan2, degrees
 import heapq
 
 # ==================== 配置 ====================
-AMAP_KEY = "0c475e7a50516001883c104383b43f31"   # 高德 Web 端 Key
+AMAP_KEY = "0c475e7a50516001883c104383b43f31"
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
-OBSTACLE_FILE = "obstacles.json"                # 障碍物数据持久化文件
+OBSTACLE_FILE = "obstacles.json"
 
 # ==================== 坐标转换 ====================
 def wgs84_to_gcj02(lng, lat):
@@ -104,180 +104,162 @@ def line_polygon_intersect(line_start, line_end, polygon):
         return True
     return False
 
-def get_polygon_bounds(polygon):
-    min_x = min(p[0] for p in polygon)
-    max_x = max(p[0] for p in polygon)
-    min_y = min(p[1] for p in polygon)
-    max_y = max(p[1] for p in polygon)
-    return min_x, min_y, max_x, max_y
-
 def get_polygon_center(polygon):
     lng_sum = sum(p[0] for p in polygon)
     lat_sum = sum(p[1] for p in polygon)
     return lng_sum/len(polygon), lat_sum/len(polygon)
 
 def get_polygon_vertices(polygon):
-    """获取多边形所有顶点"""
     return polygon
 
-# ==================== A* 路径规划算法 ====================
+# ==================== A* 路径规划算法（改进版） ====================
 class Node:
-    """A* 算法节点"""
     def __init__(self, point, parent=None):
-        self.point = point  # (lon, lat)
+        self.point = point
         self.parent = parent
-        self.g = 0  # 从起点到当前点的实际距离
-        self.h = 0  # 启发式距离（到终点的估计距离）
-        self.f = 0  # g + h
-    
+        self.g = 0
+        self.h = 0
+        self.f = 0
     def __lt__(self, other):
         return self.f < other.f
 
 def get_candidate_points(obstacles, start, end, safe_distance_km=0.05):
-    """
-    生成候选绕行点
-    包括：所有障碍物的顶点 + 扩展点
-    """
-    candidate_points = set()
-    candidate_points.add(start)
-    candidate_points.add(end)
+    """生成丰富的候选点：障碍物顶点 + 扩展点 + 边界点"""
+    candidates = set()
+    candidates.add(start)
+    candidates.add(end)
     
+    # 添加所有障碍物顶点
     for obs in obstacles:
-        polygon = [(c[0], c[1]) for c in obs['coordinates']]
-        center_lon, center_lat = get_polygon_center(polygon)
-        
-        # 添加多边形顶点
-        for point in polygon:
-            candidate_points.add(point)
-        
-        # 添加从中心向外扩展的点（8个方向）
-        lat_center = (start[1] + end[1]) / 2
-        offset_deg = safe_distance_km / 111.0
-        
-        for angle in [0, 45, 90, 135, 180, 225, 270, 315]:
-            rad = radians(angle)
-            dx = cos(rad) * offset_deg * 2
-            dy = sin(rad) * offset_deg * 2
-            expanded_point = (center_lon + dx, center_lat + dy)
-            candidate_points.add(expanded_point)
+        for point in obs['coordinates']:
+            candidates.add(tuple(point))
     
-    return list(candidate_points)
+    # 添加从障碍物中心向外扩展的点（16个方向，不同距离）
+    for obs in obstacles:
+        center_lon, center_lat = get_polygon_center(obs['coordinates'])
+        offsets = [safe_distance_km, safe_distance_km*2, safe_distance_km*3]
+        for offset in offsets:
+            offset_deg = offset / 111.0
+            for angle in range(0, 360, 45):
+                rad = radians(angle)
+                dx = cos(rad) * offset_deg
+                dy = sin(rad) * offset_deg
+                candidates.add((center_lon + dx, center_lat + dy))
+    
+    # 添加起点和终点之间的插值点，帮助穿过狭窄通道
+    num_interp = 5
+    for i in range(1, num_interp):
+        t = i / num_interp
+        interp_lon = start[0] + (end[0] - start[0]) * t
+        interp_lat = start[1] + (end[1] - start[1]) * t
+        candidates.add((interp_lon, interp_lat))
+    
+    return list(candidates)
 
-def is_path_clear(point1, point2, obstacles):
-    """检查两点之间的路径是否被任何障碍物阻挡"""
+def is_path_clear(p1, p2, obstacles):
+    """检查线段是否与任何障碍物相交"""
     for obs in obstacles:
-        polygon = [(c[0], c[1]) for c in obs['coordinates']]
-        if line_polygon_intersect(point1, point2, polygon):
+        polygon = obs['coordinates']
+        if line_polygon_intersect(p1, p2, polygon):
             return False
     return True
 
-def find_optimal_path(start, end, obstacles, safe_distance_km=0.05):
-    """
-    使用 A* 算法寻找最优绕行路径
-    """
+def find_optimal_path(start, end, obstacles, safe_distance_km=0.05, max_iter=2000):
+    """A* 算法寻找最优路径，保证返回至少一条路径（可能为直线）"""
+    # 先检查直线是否可行
     if is_path_clear(start, end, obstacles):
         return [(start, end)], haversine(start[0], start[1], end[0], end[1])
     
     # 获取候选点
     candidates = get_candidate_points(obstacles, start, end, safe_distance_km)
+    # 去重
+    candidates = list(set(candidates))
     
-    # 构建图
     open_set = []
     closed_set = set()
-    
     start_node = Node(start)
     start_node.g = 0
     start_node.h = haversine(start[0], start[1], end[0], end[1])
     start_node.f = start_node.g + start_node.h
-    
     heapq.heappush(open_set, start_node)
     
     nodes_dict = {start: start_node}
+    iterations = 0
     
-    while open_set:
+    while open_set and iterations < max_iter:
+        iterations += 1
         current = heapq.heappop(open_set)
         
-        # 到达终点
-        if haversine(current.point[0], current.point[1], end[0], end[1]) < 0.01:
-            # 构建路径
+        # 到达终点条件：距离小于 20 米
+        if haversine(current.point[0], current.point[1], end[0], end[1]) < 0.02:
+            # 重建路径
             path = []
             while current:
                 path.append(current.point)
                 current = current.parent
             path.reverse()
-            
+            # 确保终点精确
+            if path[-1] != end:
+                path.append(end)
             # 转换为航段
-            segments = []
-            for i in range(len(path) - 1):
-                segments.append((path[i], path[i+1]))
-            
-            # 计算总距离
-            total_dist = 0
-            for seg_start, seg_end in segments:
-                total_dist += haversine(seg_start[0], seg_start[1], seg_end[0], seg_end[1])
-            
+            segments = [(path[i], path[i+1]) for i in range(len(path)-1)]
+            total_dist = sum(haversine(p1[0], p1[1], p2[0], p2[1]) for p1, p2 in segments)
             return segments, total_dist
         
         closed_set.add(current.point)
         
-        # 扩展邻居节点
-        for candidate in candidates:
-            if candidate in closed_set:
+        # 扩展邻居
+        for cand in candidates:
+            if cand in closed_set:
+                continue
+            # 检查与当前点的连线是否被阻挡
+            if not is_path_clear(current.point, cand, obstacles):
                 continue
             
-            # 检查路径是否被阻挡
-            if not is_path_clear(current.point, candidate, obstacles):
-                continue
+            new_g = current.g + haversine(current.point[0], current.point[1], cand[0], cand[1])
             
-            # 计算新节点的 g 值
-            new_g = current.g + haversine(current.point[0], current.point[1], candidate[0], candidate[1])
-            
-            if candidate not in nodes_dict:
-                nodes_dict[candidate] = Node(candidate)
-            
-            neighbor = nodes_dict[candidate]
+            if cand not in nodes_dict:
+                nodes_dict[cand] = Node(cand)
+            neighbor = nodes_dict[cand]
             
             if new_g < neighbor.g or neighbor.g == 0:
                 neighbor.parent = current
                 neighbor.g = new_g
-                neighbor.h = haversine(candidate[0], candidate[1], end[0], end[1])
+                neighbor.h = haversine(cand[0], cand[1], end[0], end[1])
                 neighbor.f = neighbor.g + neighbor.h
-                
                 if neighbor not in open_set:
                     heapq.heappush(open_set, neighbor)
     
-    # 如果没有找到路径，返回直线（但标记为不安全）
+    # 如果找不到路径，返回直线并标记不安全
     return [(start, end)], haversine(start[0], start[1], end[0], end[1])
 
 def find_avoidance_path_multi_obstacle(start, end, obstacles, flight_altitude, safe_distance_km=0.05):
-    """
-    多障碍物避障：使用 A* 算法寻找最优路径
-    """
-    # 筛选需要避让的障碍物
-    blocking_obstacles = []
+    """多障碍物避障入口"""
+    # 筛选需要避让的障碍物（高度 >= 飞行高度且与直线相交）
+    blocking = []
     for obs in obstacles:
-        obstacle_height = obs.get('height', 50)
-        if obstacle_height >= flight_altitude:
-            polygon = [(c[0], c[1]) for c in obs['coordinates']]
-            if line_polygon_intersect(start, end, polygon):
-                blocking_obstacles.append(obs)
+        if obs.get('height', 50) >= flight_altitude:
+            if line_polygon_intersect(start, end, obs['coordinates']):
+                blocking.append(obs)
     
-    if not blocking_obstacles:
-        return [(start, end)], haversine(start[0], start[1], end[0], end[1]), False
+    if not blocking:
+        # 直线安全
+        return [(start, end)], haversine(start[0], start[1], end[0], end[1]), True
     
-    # 使用 A* 算法寻找最优路径
-    segments, total_dist = find_optimal_path(start, end, blocking_obstacles, safe_distance_km)
+    # 使用 A* 寻找路径
+    segments, total_dist = find_optimal_path(start, end, blocking, safe_distance_km)
     
     # 验证最终路径是否安全
-    is_safe = True
+    safe = True
     for seg_start, seg_end in segments:
-        for obs in blocking_obstacles:
-            polygon = [(c[0], c[1]) for c in obs['coordinates']]
-            if line_polygon_intersect(seg_start, seg_end, polygon):
-                is_safe = False
+        for obs in blocking:
+            if line_polygon_intersect(seg_start, seg_end, obs['coordinates']):
+                safe = False
                 break
+        if not safe:
+            break
     
-    return segments, total_dist, is_safe
+    return segments, total_dist, safe
 
 # ==================== 障碍物管理 ====================
 def load_obstacles():
@@ -729,12 +711,12 @@ elif st.session_state.page == "航线规划":
             # 检测需要避让的障碍物
             blocking_obstacles = []
             for obs in st.session_state.obstacles:
-                polygon = [(c[0], c[1]) for c in obs['coordinates']]
+                polygon = obs['coordinates']
                 obstacle_height = obs.get('height', 50)
                 if line_polygon_intersect(start_point, end_point, polygon) and obstacle_height >= st.session_state.flight_altitude:
                     blocking_obstacles.append(obs)
             
-            # 计算最优路径
+            # 计算路径
             if avoidance_enabled and blocking_obstacles:
                 segments, total_dist, is_safe = find_avoidance_path_multi_obstacle(
                     start_point, end_point, 
@@ -742,14 +724,13 @@ elif st.session_state.page == "航线规划":
                     st.session_state.flight_altitude,
                     st.session_state.safe_distance
                 )
-                
                 original_dist = haversine(start_point[0], start_point[1], end_point[0], end_point[1])
                 extra_dist = total_dist - original_dist
                 
                 if is_safe:
                     st.markdown(f'<div class="optimal-text">✨ A* 最优路径已生成：绕过 {len(blocking_obstacles)} 个障碍物，总距离 {total_dist:.3f} km（额外 {extra_dist:.3f} km）</div>', unsafe_allow_html=True)
                 else:
-                    st.markdown(f'<div class="warning-text-yellow">⚠️ 警告：无法找到完全安全的路径，请调整安全距离或飞行高度</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="warning-text-yellow">⚠️ 警告：未找到完全安全的路径，当前路径可能仍与障碍物相交，请调整安全距离</div>', unsafe_allow_html=True)
             elif blocking_obstacles:
                 st.markdown(f'<div class="danger-text">⚠️ 危险：航线与 {len(blocking_obstacles)} 个障碍物相交！请启用 A* 避障</div>', unsafe_allow_html=True)
             else:
@@ -815,22 +796,29 @@ elif st.session_state.page == "航线规划":
                         st.session_state.safe_distance
                     )
                     
+                    # 确保 segments 不为空
+                    if not segments:
+                        segments = [(start_point, end_point)]
+                    
                     # 绘制路径
                     colors = ['#00FF00', '#00BFFF', '#1E90FF', '#4169E1', '#0000CD']
                     for i, (seg_start, seg_end) in enumerate(segments):
+                        # folium 要求坐标顺序为 [lat, lng]
                         line_points = [[seg_start[1], seg_start[0]], [seg_end[1], seg_end[0]]]
                         color = colors[i % len(colors)]
                         folium.PolyLine(line_points, color=color, weight=4, opacity=0.8).add_to(m)
                     
-                    # 标记绕行点
-                    for i, (seg_start, seg_end) in enumerate(segments[:-1]):
-                        folium.CircleMarker(
-                            location=[seg_end[1], seg_end[0]],
-                            radius=6,
-                            color='orange',
-                            fill=True,
-                            popup=f"绕行点 {i+1}"
-                        ).add_to(m)
+                    # 标记绕行点（中间节点）
+                    if len(segments) > 1:
+                        for i in range(len(segments)-1):
+                            waypoint = segments[i][1]  # 每个航段的终点
+                            folium.CircleMarker(
+                                location=[waypoint[1], waypoint[0]],
+                                radius=6,
+                                color='orange',
+                                fill=True,
+                                popup=f"绕行点 {i+1}"
+                            ).add_to(m)
                     
                     original_dist = haversine(start_point[0], start_point[1], end_point[0], end_point[1])
                     extra = total_dist - original_dist
@@ -949,13 +937,13 @@ elif st.session_state.page == "障碍物管理":
     
     with col_right:
         st.info("""
-        📌 **A* 最优路径避障算法**
+        📌 **A* 最优路径避障算法（已修复显示问题）**
         
         - **算法特点**：
           - 使用 A* 搜索算法寻找最短绕行路径
-          - 候选点包括障碍物顶点和扩展点
+          - 候选点包括障碍物顶点、扩展点和路径插值点
           - 自动处理多个障碍物连续绕行
-          - 保证路径完全绕过所有障碍物
+          - 保证总能返回路径（至少直线）
         
         - **参数说明**：
           - **安全距离**：路径与障碍物的最小距离（10-500米）
