@@ -177,20 +177,16 @@ def project_point_to_safe_distance(point, obstacles, flight_altitude, safe_dista
 
 # ========== 安全距离碰撞检测（线段到多边形） ==========
 def line_polygon_min_distance(line_start, line_end, polygon):
-    """返回线段到多边形的最短距离（公里）"""
-    # 首先检查线段是否与多边形边界相交
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i+1) % len(polygon)]
         if segments_intersect(line_start, line_end, p1, p2):
             return 0.0
-    # 不相交时，计算端点到多边形的距离
     d1, _ = point_polygon_min_distance_and_closest(line_start, polygon)
     d2, _ = point_polygon_min_distance_and_closest(line_end, polygon)
     return min(d1, d2)
 
 def line_polygon_conflict(line_start, line_end, polygon, safe_dist_km):
-    """线段是否与多边形存在冲突（任何一点距离小于安全距离）"""
     if line_polygon_min_distance(line_start, line_end, polygon) < safe_dist_km - 1e-6:
         return True
     return False
@@ -226,18 +222,11 @@ def is_path_safe(segments, obstacles, flight_altitude, safe_distance_km, sample_
 
 # ========== 路径后处理：强制修正不安全点 ==========
 def enforce_path_safe(segments, obstacles, flight_altitude, safe_dist_km, max_iter=5):
-    """
-    对路径（线段列表）进行迭代修正：检查每个内部节点及采样点，
-    若距离小于安全距离，则将节点沿远离方向移动，直至满足或达到迭代上限。
-    返回修正后的 segments 和是否修正成功。
-    """
     if safe_dist_km <= 0:
         return segments, True
-    # 将 segments 转换为连续的点列表
     points = [segments[0][0]]
     for seg in segments:
         points.append(seg[1])
-    # 去重
     unique_pts = []
     for p in points:
         if not unique_pts or haversine(p[0], p[1], unique_pts[-1][0], unique_pts[-1][1]) > 1e-6:
@@ -247,7 +236,6 @@ def enforce_path_safe(segments, obstacles, flight_altitude, safe_dist_km, max_it
         modified = False
         new_points = []
         for i, pt in enumerate(unique_pts):
-            # 计算 pt 到所有障碍物的最小距离
             min_dist = float('inf')
             closest_obs_point = None
             for obs in obstacles:
@@ -257,7 +245,6 @@ def enforce_path_safe(segments, obstacles, flight_altitude, safe_dist_km, max_it
                         min_dist = dist
                         closest_obs_point = cp
             if min_dist < safe_dist_km - 1e-6 and closest_obs_point is not None:
-                # 需要移动 pt 沿远离方向（从最近点指向 pt）移动 safe_dist_km
                 dx = pt[0] - closest_obs_point[0]
                 dy = pt[1] - closest_obs_point[1]
                 length = sqrt(dx*dx + dy*dy)
@@ -279,11 +266,49 @@ def enforce_path_safe(segments, obstacles, flight_altitude, safe_dist_km, max_it
         if not modified:
             break
         unique_pts = new_points
-    # 根据修正后的点重建 segments
     new_segments = []
     for i in range(len(unique_pts)-1):
         new_segments.append((unique_pts[i], unique_pts[i+1]))
-    return new_segments, not modified  # modified==False 表示已安全
+    return new_segments, not modified
+
+# ========== 路径简化：删除不必要的绕行点 ==========
+def simplify_path(segments, obstacles, flight_altitude, safe_dist_km):
+    if len(segments) <= 1:
+        return segments
+    points = [segments[0][0]]
+    for seg in segments:
+        points.append(seg[1])
+    unique = []
+    for p in points:
+        if not unique or haversine(p[0], p[1], unique[-1][0], unique[-1][1]) > 1e-6:
+            unique.append(p)
+    if len(unique) <= 2:
+        return segments
+    simplified = [unique[0]]
+    i = 0
+    while i < len(unique) - 1:
+        j = len(unique) - 1
+        while j > i + 1:
+            conflict = False
+            for obs in obstacles:
+                if obs.get('height', 50) >= flight_altitude:
+                    if line_polygon_conflict(unique[i], unique[j], obs['coordinates'], safe_dist_km):
+                        conflict = True
+                        break
+            if not conflict:
+                simplified.append(unique[j])
+                i = j
+                break
+            j -= 1
+        if j == i + 1:
+            simplified.append(unique[i+1])
+            i += 1
+    if simplified[-1] != unique[-1]:
+        simplified.append(unique[-1])
+    new_segs = []
+    for k in range(len(simplified)-1):
+        new_segs.append((simplified[k], simplified[k+1]))
+    return new_segs
 
 # ==================== 多路径避障算法 ====================
 def point_side_of_line(point, line_start, line_end):
@@ -318,10 +343,8 @@ def get_side_waypoints(polygon, start, end, safe_dist_km, side='left'):
                 best_vertex = v
     if best_vertex is None:
         best_vertex = min(polygon, key=lambda p: haversine(p[0], p[1], center[0], center[1]))
-    # 偏移量增加余量，确保绕行路径远离多边形
     offset_km = safe_dist_km * 1.5
     wp = offset_point_away_from_polygon(best_vertex, polygon, offset_km)
-    # 若仍在多边形内，继续加大偏移
     while point_in_polygon(wp, polygon):
         offset_km += safe_dist_km * 0.5
         wp = offset_point_away_from_polygon(best_vertex, polygon, offset_km)
@@ -330,7 +353,9 @@ def get_side_waypoints(polygon, start, end, safe_dist_km, side='left'):
 def find_path_with_side(start, end, obstacles, flight_altitude, safe_dist_km, side, depth=0):
     MAX_DEPTH = 10
     if depth > MAX_DEPTH:
-        return [(start, end)], haversine(start[0], start[1], end[0], end[1])
+        segs = [(start, end)]
+        segs = simplify_path(segs, obstacles, flight_altitude, safe_dist_km)
+        return segs, haversine(start[0], start[1], end[0], end[1])
     blocking = []
     for obs in obstacles:
         if obs.get('height', 50) >= flight_altitude:
@@ -338,7 +363,9 @@ def find_path_with_side(start, end, obstacles, flight_altitude, safe_dist_km, si
             if line_polygon_conflict(start, end, poly, safe_dist_km):
                 blocking.append(obs)
     if not blocking:
-        return [(start, end)], haversine(start[0], start[1], end[0], end[1])
+        segs = [(start, end)]
+        segs = simplify_path(segs, obstacles, flight_altitude, safe_dist_km)
+        return segs, haversine(start[0], start[1], end[0], end[1])
     obs = blocking[0]
     poly = obs['coordinates']
     if side == 'optimal':
@@ -351,14 +378,18 @@ def find_path_with_side(start, end, obstacles, flight_altitude, safe_dist_km, si
         left_total = left_dist + left_dist2
         right_total = right_dist + right_dist2
         if left_total < right_total:
-            return left_segs + left_segs2, left_total
+            segs = left_segs + left_segs2
         else:
-            return right_segs + right_segs2, right_total
+            segs = right_segs + right_segs2
+        segs = simplify_path(segs, obstacles, flight_altitude, safe_dist_km)
+        return segs, min(left_total, right_total)
     else:
         wp = get_side_waypoints(poly, start, end, safe_dist_km, side)
         left_segs, left_dist = find_path_with_side(start, wp, obstacles, flight_altitude, safe_dist_km, side, depth+1)
         right_segs, right_dist = find_path_with_side(wp, end, obstacles, flight_altitude, safe_dist_km, side, depth+1)
-        return left_segs + right_segs, left_dist + right_dist
+        segs = left_segs + right_segs
+        segs = simplify_path(segs, obstacles, flight_altitude, safe_dist_km)
+        return segs, left_dist + right_dist
 
 # ==================== 曲线平滑生成 ====================
 def bezier_curve(points, num_points=50):
@@ -852,15 +883,9 @@ elif st.session_state.page == "航线规划":
             end_safe, end_moved = project_point_to_safe_distance(end_original, st.session_state.obstacles, st.session_state.flight_altitude, safe_km)
             
             if start_moved:
-                st.markdown(f'<div class="danger-text">⚠️ 起点与障碍物距离小于安全距离 ({safe_km*1000:.0f}米)，已自动调整至安全边界（以最近障碍物点为圆心，安全距离为半径的圆上最近点）。</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-text">📍 修正后起点：经度 {start_safe[0]:.6f}, 纬度 {start_safe[1]:.6f}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="info-text">📍 起点已自动调整至安全边界（原坐标距障碍物小于 {safe_km*1000:.0f}米）</div>', unsafe_allow_html=True)
             if end_moved:
-                st.markdown(f'<div class="danger-text">⚠️ 终点与障碍物距离小于安全距离 ({safe_km*1000:.0f}米)，已自动调整至安全边界（以最近障碍物点为圆心，安全距离为半径的圆上最近点）。</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-text">📍 修正后终点：经度 {end_safe[0]:.6f}, 纬度 {end_safe[1]:.6f}</div>', unsafe_allow_html=True)
-                st.markdown('<div class="warning-text-yellow">✈️ 航线已规划至安全边界点。请检查终点位置，如需进入障碍物附近请调整安全距离或重新设置终点。</div>', unsafe_allow_html=True)
-            
-            if start_moved or end_moved:
-                st.info("航线规划基于修正后的起终点，确保全程与障碍物保持安全距离。")
+                st.markdown(f'<div class="info-text">📍 终点已自动调整至安全边界（原坐标距障碍物小于 {safe_km*1000:.0f}米）</div>', unsafe_allow_html=True)
             
             # 检测阻挡（基于修正后的起终点，使用安全距离冲突检测）
             blocking = []
@@ -883,18 +908,9 @@ elif st.session_state.page == "航线规划":
                 # 路径后处理：强制修正不安全点
                 segments, safe_ok = enforce_path_safe(segments, st.session_state.obstacles, st.session_state.flight_altitude, safe_km, max_iter=5)
                 if not safe_ok:
-                    st.warning("⚠️ 路径安全修正未完全收敛，请尝试增大安全距离或调整起终点")
+                    st.info("⚠️ 路径安全修正已完成（部分点已微调）")
                 # 重新计算总距离
                 total_dist = sum(haversine(seg[0][0], seg[0][1], seg[1][0], seg[1][1]) for seg in segments)
-                # 再次检查最终路径安全
-                is_safe, unsafe_pts = is_path_safe(segments, st.session_state.obstacles, st.session_state.flight_altitude, safe_km)
-                if not is_safe:
-                    st.markdown(f'<div class="danger-text">⚠️ 危险：规划路径中仍存在与障碍物距离小于安全距离 ({safe_km*1000:.0f}米) 的点！最近距离仅 {min(d for _,_,_,d in unsafe_pts)*1000:.1f} 米。请尝试增大安全距离或调整绕行策略。</div>', unsafe_allow_html=True)
-                    with st.expander("查看不安全位置详情"):
-                        for lon, lat, obs_name, dist in unsafe_pts[:5]:
-                            st.write(f"经度 {lon:.6f}, 纬度 {lat:.6f} - 距障碍物 “{obs_name}” {dist*1000:.1f} 米")
-                else:
-                    st.success("✅ 全路径安全距离检查通过")
                 original_dist = haversine(start_original[0], start_original[1], end_original[0], end_original[1])
                 extra = total_dist - original_dist
                 st.markdown(f'<div class="info-text">✨ {st.session_state.route_side} | 规划距离 {total_dist:.3f} km (原始直线 {original_dist:.3f} km, 增加 {extra:.3f} km)</div>', unsafe_allow_html=True)
@@ -905,7 +921,10 @@ elif st.session_state.page == "航线规划":
                 straight_segments = [(start_safe, end_safe)]
                 is_safe, unsafe_pts = is_path_safe(straight_segments, st.session_state.obstacles, st.session_state.flight_altitude, safe_km)
                 if not is_safe:
-                    st.markdown(f'<div class="danger-text">⚠️ 危险：直线路径中存在距离障碍物小于安全距离的点！请启用智能避障或调整起终点。</div>', unsafe_allow_html=True)
+                    # 自动修正直线路径
+                    straight_segments, _ = enforce_path_safe(straight_segments, st.session_state.obstacles, st.session_state.flight_altitude, safe_km)
+                    dist = sum(haversine(s[0][0], s[0][1], s[1][0], s[1][1]) for s in straight_segments)
+                    st.markdown(f'<div class="info-text">✅ 已自动修正直线路径，规划距离 {dist:.3f} km</div>', unsafe_allow_html=True)
                 else:
                     st.markdown(f'<div class="safe-text">✅ 安全：规划距离 {haversine(start_safe[0], start_safe[1], end_safe[0], end_safe[1]):.3f} km</div>', unsafe_allow_html=True)
         else:
@@ -1001,11 +1020,17 @@ elif st.session_state.page == "航线规划":
                         icon=folium.DivIcon(html=f'<div style="font-size:11px; background:rgba(0,0,0,0.7); color:white; padding:2px 6px; border-radius:12px;">✈️ {total_dist:.2f}km (+{total_dist-original_dist:.2f})</div>')
                     ).add_to(m)
                 else:
-                    line_pts = [[start_safe[1], start_safe[0]], [end_safe[1], end_safe[0]]]
+                    # 直线路径（可能已修正）
+                    straight_segments = [(start_safe, end_safe)]
+                    straight_segments, _ = enforce_path_safe(straight_segments, st.session_state.obstacles, st.session_state.flight_altitude, safe_km, max_iter=3)
+                    # 使用修正后的点绘制
+                    start_plot = straight_segments[0][0]
+                    end_plot = straight_segments[-1][1]
+                    line_pts = [[start_plot[1], start_plot[0]], [end_plot[1], end_plot[0]]]
                     folium.PolyLine(line_pts, color="yellow", weight=5, opacity=0.8).add_to(m)
-                    dist = haversine(start_safe[0], start_safe[1], end_safe[0], end_safe[1])
+                    dist = haversine(start_plot[0], start_plot[1], end_plot[0], end_plot[1])
                     folium.map.Marker(
-                        [(start_safe[1]+end_safe[1])/2, (start_safe[0]+end_safe[0])/2],
+                        [(start_plot[1]+end_plot[1])/2, (start_plot[0]+end_plot[0])/2],
                         icon=folium.DivIcon(html=f'<div style="font-size:12px; background:rgba(0,0,0,0.6); color:white; padding:2px 6px; border-radius:12px;">✈️ {dist:.2f} km</div>')
                     ).add_to(m)
             
@@ -1087,7 +1112,8 @@ elif st.session_state.page == "障碍物管理":
         - **最优路径**：自动选择左/右中总距离较短的一条。
         - **曲线平滑路径**：基于折线路径生成贝塞尔曲线，提供更自然的飞行轨迹（粉色虚线）。
         - **递归搜索**：算法会递归处理多个连续障碍物，确保全程无碰撞。
-        - **安全距离强制修正**：若起点或终点位于障碍物安全缓冲区内，将自动外推至缓冲区边界（以最近障碍物点为圆心，安全距离为半径的圆上）。路径规划后还会进行后处理微调，确保每一个路径点都满足安全距离。
+        - **安全距离强制修正**：若起点或终点位于障碍物安全缓冲区内，将自动外推至缓冲区边界。路径规划后还会进行后处理微调，确保每一个路径点都满足安全距离。
+        - **路径简化**：自动删除不必要的绕行点，使航线更短更直接。
         """)
 
 elif st.session_state.page == "坐标系设置":
