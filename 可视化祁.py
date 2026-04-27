@@ -275,39 +275,54 @@ def enforce_path_safe(segments, obstacles, flight_altitude, safe_dist_km, max_it
 def simplify_path(segments, obstacles, flight_altitude, safe_dist_km):
     if len(segments) <= 1:
         return segments
+    # 转换为连续点列表
     points = [segments[0][0]]
     for seg in segments:
         points.append(seg[1])
+    # 去重
     unique = []
     for p in points:
         if not unique or haversine(p[0], p[1], unique[-1][0], unique[-1][1]) > 1e-6:
             unique.append(p)
     if len(unique) <= 2:
-        return segments
-    simplified = [unique[0]]
-    i = 0
-    while i < len(unique) - 1:
-        j = len(unique) - 1
-        while j > i + 1:
-            conflict = False
-            for obs in obstacles:
-                if obs.get('height', 50) >= flight_altitude:
-                    if line_polygon_conflict(unique[i], unique[j], obs['coordinates'], safe_dist_km):
-                        conflict = True
-                        break
-            if not conflict:
-                simplified.append(unique[j])
-                i = j
-                break
-            j -= 1
-        if j == i + 1:
-            simplified.append(unique[i+1])
-            i += 1
-    if simplified[-1] != unique[-1]:
-        simplified.append(unique[-1])
+        return [(unique[0], unique[1])]
+    
+    # 迭代简化
+    changed = True
+    while changed:
+        changed = False
+        new_points = [unique[0]]
+        i = 0
+        while i < len(unique) - 1:
+            # 从最后一个点向前找第一个可以直接连接的点
+            j = len(unique) - 1
+            while j > i + 1:
+                conflict = False
+                for obs in obstacles:
+                    if obs.get('height', 50) >= flight_altitude:
+                        if line_polygon_conflict(unique[i], unique[j], obs['coordinates'], safe_dist_km):
+                            conflict = True
+                            break
+                if not conflict:
+                    new_points.append(unique[j])
+                    i = j
+                    changed = True
+                    break
+                j -= 1
+            if j == i + 1:
+                new_points.append(unique[i+1])
+                i += 1
+        if changed:
+            if new_points[-1] != unique[-1]:
+                new_points.append(unique[-1])
+            unique = new_points
+        else:
+            break
+    
+    # 重建segments
     new_segs = []
-    for k in range(len(simplified)-1):
-        new_segs.append((simplified[k], simplified[k+1]))
+    for k in range(len(unique)-1):
+        new_segs.append((unique[k], unique[k+1]))
     return new_segs
 
 # ==================== 多路径避障算法 ====================
@@ -328,21 +343,28 @@ def offset_point_away_from_polygon(pt, polygon, dist_km):
     return (new_x, new_y)
 
 def get_side_waypoints(polygon, start, end, safe_dist_km, side='left'):
+    """
+    生成绕行点：选择多边形上在线段侧向且远离多边形中心的顶点，
+    并沿远离方向偏移 safe_dist_km * 1.5，确保路径远离障碍物。
+    """
     center = get_polygon_center(polygon)
-    best_vertex = None
-    best_side_val = None
+    def point_side(p):
+        return (end[0] - start[0]) * (p[1] - start[1]) - (end[1] - start[1]) * (p[0] - start[0])
+    
+    candidates = []
     for v in polygon:
-        side_val = point_side_of_line(v, start, end)
+        side_val = point_side(v)
         if side == 'left' and side_val > 0:
-            if best_side_val is None or side_val > best_side_val:
-                best_side_val = side_val
-                best_vertex = v
+            candidates.append((side_val, v))
         elif side == 'right' and side_val < 0:
-            if best_side_val is None or side_val < best_side_val:
-                best_side_val = side_val
-                best_vertex = v
-    if best_vertex is None:
+            candidates.append((-side_val, v))
+    
+    if not candidates:
         best_vertex = min(polygon, key=lambda p: haversine(p[0], p[1], center[0], center[1]))
+    else:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_vertex = candidates[0][1]
+    
     offset_km = safe_dist_km * 1.5
     wp = offset_point_away_from_polygon(best_vertex, polygon, offset_km)
     while point_in_polygon(wp, polygon):
@@ -381,15 +403,19 @@ def find_path_with_side(start, end, obstacles, flight_altitude, safe_dist_km, si
             segs = left_segs + left_segs2
         else:
             segs = right_segs + right_segs2
-        segs = simplify_path(segs, obstacles, flight_altitude, safe_dist_km)
-        return segs, min(left_total, right_total)
     else:
         wp = get_side_waypoints(poly, start, end, safe_dist_km, side)
         left_segs, left_dist = find_path_with_side(start, wp, obstacles, flight_altitude, safe_dist_km, side, depth+1)
         right_segs, right_dist = find_path_with_side(wp, end, obstacles, flight_altitude, safe_dist_km, side, depth+1)
         segs = left_segs + right_segs
+    
+    # 多次简化直到稳定
+    prev_len = 0
+    while len(segs) != prev_len:
+        prev_len = len(segs)
         segs = simplify_path(segs, obstacles, flight_altitude, safe_dist_km)
-        return segs, left_dist + right_dist
+    total_dist = sum(haversine(s[0][0], s[0][1], s[1][0], s[1][1]) for s in segs)
+    return segs, total_dist
 
 # ==================== 曲线平滑生成 ====================
 def bezier_curve(points, num_points=50):
