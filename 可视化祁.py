@@ -14,7 +14,7 @@ import pytz
 import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
-from math import radians, sin, cos, sqrt, asin, pi, atan2, degrees
+from math import radians, sin, cos, sqrt, asin, pi, atan2, degrees, fabs
 
 # ==================== 配置 ====================
 AMAP_KEY = "0c475e7a50516001883c104383b43f31"
@@ -115,16 +115,49 @@ def get_polygon_bounds(polygon):
     max_y = max(p[1] for p in polygon)
     return min_x, min_y, max_x, max_y
 
-# ==================== 新增：检查点是否位于任意障碍物内（考虑高度） ====================
-def is_point_in_any_obstacle(point, flight_altitude, obstacles):
+# ========== 新增：点到线段距离（单位：公里） ==========
+def point_to_segment_distance(px, py, x1, y1, x2, y2):
+    """计算点 (px,py) 到线段 (x1,y1)-(x2,y2) 的最短距离（公里）"""
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0 and dy == 0:
+        # 线段是一个点
+        return haversine(px, py, x1, y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / (dx*dx + dy*dy)
+    if t < 0:
+        closest_x, closest_y = x1, y1
+    elif t > 1:
+        closest_x, closest_y = x2, y2
+    else:
+        closest_x = x1 + t * dx
+        closest_y = y1 + t * dy
+    return haversine(px, py, closest_x, closest_y)
+
+def point_polygon_min_distance(point, polygon):
+    """计算点到多边形的最短距离（公里）。若点在多边形内部，返回 0。"""
+    if point_in_polygon(point, polygon):
+        return 0.0
+    min_dist = float('inf')
+    n = len(polygon)
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i+1) % n]
+        dist = point_to_segment_distance(point[0], point[1], x1, y1, x2, y2)
+        if dist < min_dist:
+            min_dist = dist
+    return min_dist
+
+def is_point_in_obstacle_buffer(point, flight_altitude, safe_distance_km, obstacles):
     """
-    检查点 (lon, lat) 是否位于任何高度不小于 flight_altitude 的障碍物多边形内
+    检查点是否位于任何高度合格的障碍物的安全缓冲区内（距离 < safe_distance_km）
+    返回 (是否在缓冲区内, 最近的障碍物名称)
     """
     for obs in obstacles:
         if obs.get('height', 50) >= flight_altitude:
-            if point_in_polygon(point, obs['coordinates']):
-                return True
-    return False
+            dist = point_polygon_min_distance(point, obs['coordinates'])
+            if dist < safe_distance_km:
+                return True, obs['name']
+    return False, None
 
 # ==================== 多路径避障算法（支持左/右/最优） ====================
 def point_side_of_line(point, line_start, line_end):
@@ -714,17 +747,18 @@ elif st.session_state.page == "航线规划":
         if st.session_state.a_point and st.session_state.b_point:
             start_point = (st.session_state.a_point['lon_gcj'], st.session_state.a_point['lat_gcj'])
             end_point = (st.session_state.b_point['lon_gcj'], st.session_state.b_point['lat_gcj'])
+            safe_km = st.session_state.safe_distance if st.session_state.avoidance_enabled else 0.0
             
-            # ========= 新增：检查起点或终点是否位于障碍物内部 =========
-            start_in_obs = is_point_in_any_obstacle(start_point, st.session_state.flight_altitude, st.session_state.obstacles)
-            end_in_obs = is_point_in_any_obstacle(end_point, st.session_state.flight_altitude, st.session_state.obstacles)
+            # ========= 新增：检查起点/终点是否在障碍物的安全缓冲区内 =========
+            start_in_buffer, obs_name_start = is_point_in_obstacle_buffer(start_point, st.session_state.flight_altitude, safe_km, st.session_state.obstacles)
+            end_in_buffer, obs_name_end = is_point_in_obstacle_buffer(end_point, st.session_state.flight_altitude, safe_km, st.session_state.obstacles)
             
-            if start_in_obs or end_in_obs:
-                st.markdown(
-                    '<div class="danger-text">⚠️ 危险：起点或终点位于障碍物区域内！请调整起终点位置，确保不在任何障碍物内部。</div>',
-                    unsafe_allow_html=True
-                )
-                # 不进行后续任何路径规划信息展示
+            if start_in_buffer or end_in_buffer:
+                if start_in_buffer:
+                    st.markdown(f'<div class="danger-text">⚠️ 危险：起点距离障碍物 “{obs_name_start}” 小于安全距离 ({safe_km*1000:.0f}米)！请调整起点位置。</div>', unsafe_allow_html=True)
+                if end_in_buffer:
+                    st.markdown(f'<div class="danger-text">⚠️ 危险：终点距离障碍物 “{obs_name_end}” 小于安全距离 ({safe_km*1000:.0f}米)！请调整终点位置。</div>', unsafe_allow_html=True)
+                # 不进行后续路径规划信息展示
             else:
                 # 原有检测阻挡的逻辑
                 blocking = []
@@ -741,7 +775,7 @@ elif st.session_state.page == "航线规划":
                         start_point, end_point,
                         st.session_state.obstacles,
                         st.session_state.flight_altitude,
-                        st.session_state.safe_distance,
+                        safe_km,
                         side_key
                     )
                     original_dist = haversine(start_point[0], start_point[1], end_point[0], end_point[1])
@@ -792,20 +826,21 @@ elif st.session_state.page == "航线规划":
                 folium.Marker(location=[st.session_state.b_point['lat_gcj'], st.session_state.b_point['lon_gcj']],
                               popup="B点", icon=folium.Icon(color='red', icon='stop', prefix='fa')).add_to(m)
             
-            # 绘制路径（仅当 A、B 点都存在且不在任何障碍物内时）
+            # 绘制路径（仅当 A、B 点都存在且不在任何障碍物缓冲区内时）
             if st.session_state.a_point and st.session_state.b_point:
                 start_pt = (st.session_state.a_point['lon_gcj'], st.session_state.a_point['lat_gcj'])
                 end_pt = (st.session_state.b_point['lon_gcj'], st.session_state.b_point['lat_gcj'])
+                safe_km = st.session_state.safe_distance if st.session_state.avoidance_enabled else 0.0
                 
-                # 再次检查起点/终点是否在障碍物内部（与左侧保持一致）
-                start_in_obs = is_point_in_any_obstacle(start_pt, st.session_state.flight_altitude, st.session_state.obstacles)
-                end_in_obs = is_point_in_any_obstacle(end_pt, st.session_state.flight_altitude, st.session_state.obstacles)
+                # 再次检查起点/终点是否在缓冲区内
+                start_in_buffer, _ = is_point_in_obstacle_buffer(start_pt, st.session_state.flight_altitude, safe_km, st.session_state.obstacles)
+                end_in_buffer, _ = is_point_in_obstacle_buffer(end_pt, st.session_state.flight_altitude, safe_km, st.session_state.obstacles)
                 
-                if start_in_obs or end_in_obs:
-                    # 不绘制任何航线，仅显示警告（实际已经显示过，这里再显示一次以确保地图上也有提示）
+                if start_in_buffer or end_in_buffer:
+                    # 不绘制任何航线，仅显示警告标签
                     folium.map.Marker(
                         [(start_pt[1]+end_pt[1])/2, (start_pt[0]+end_pt[0])/2],
-                        icon=folium.DivIcon(html='<div style="font-size:12px; background:red; color:white; padding:4px; border-radius:8px;">⚠️ 起点/终点在障碍物内</div>')
+                        icon=folium.DivIcon(html='<div style="font-size:12px; background:red; color:white; padding:4px; border-radius:8px;">⚠️ 起点/终点 距障碍物过近</div>')
                     ).add_to(m)
                 else:
                     # 检查是否需要绕行
@@ -821,7 +856,7 @@ elif st.session_state.page == "航线规划":
                         side_key = {"最优路径": "optimal", "左侧绕行": "left", "右侧绕行": "right"}[st.session_state.route_side]
                         segments, total_dist = find_path_with_side(
                             start_pt, end_pt, st.session_state.obstacles,
-                            st.session_state.flight_altitude, st.session_state.safe_distance, side_key
+                            st.session_state.flight_altitude, safe_km, side_key
                         )
                         # 提取折线点
                         polyline_points = [start_pt]
@@ -944,6 +979,7 @@ elif st.session_state.page == "障碍物管理":
         - **最优路径**：自动选择左/右中总距离较短的一条。
         - **曲线平滑路径**：基于折线路径生成贝塞尔曲线，提供更自然的飞行轨迹（粉色虚线）。
         - **递归搜索**：算法会递归处理多个连续障碍物，确保全程无碰撞。
+        - **安全缓冲区**：若起点或终点距离任意障碍物小于设定的绕行安全距离，系统会报警并禁止规划航线。
         """)
 
 elif st.session_state.page == "坐标系设置":
