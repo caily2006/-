@@ -130,19 +130,6 @@ def point_to_polygon_min_distance(point, polygon):
             min_dist = dist
     return min_dist
 
-def segment_to_polygon_min_distance(seg_start, seg_end, polygon):
-    # 采样线段上的多个点，近似最小距离
-    num_samples = 10
-    min_dist = float('inf')
-    for i in range(num_samples + 1):
-        t = i / num_samples
-        lon = seg_start[0] + t * (seg_end[0] - seg_start[0])
-        lat = seg_start[1] + t * (seg_end[1] - seg_start[1])
-        dist = point_to_polygon_min_distance((lon, lat), polygon)
-        if dist < min_dist:
-            min_dist = dist
-    return min_dist
-
 # ==================== 多路径避障算法 ====================
 def point_side_of_line(point, line_start, line_end):
     return (line_end[0] - line_start[0]) * (point[1] - line_start[1]) - (line_end[1] - line_start[1]) * (point[0] - line_start[0])
@@ -243,17 +230,26 @@ def bezier_curve(points, num_points=50):
 
 # ==================== 垂直悬停点生成（带障碍物和航线检测） ====================
 def get_perpendicular_hover_point(end_point, approach_dir, distance_m=10.0, side='right'):
+    """
+    在终点 end_point 处，沿 approach_dir 的法线方向偏移 distance_m 米。
+    approach_dir: 单位向量 (ux, uy) 指向航线方向（从 A 到 B）
+    side: 'left' 或 'right'，定义法线方向（左侧为正，右侧为负）
+    返回偏移后的点坐标 (lon, lat)
+    """
     ux, uy = approach_dir
+    # 法线：左侧 = (-uy, ux)，右侧 = (uy, -ux)
     if side == 'left':
         nx = -uy
         ny = ux
     else:
         nx = uy
         ny = -ux
+    # 距离转换为度数（粗略，后续会精确修正）
     dist_deg = distance_m / 1000.0 / 111.0
     lon = end_point[0] + nx * dist_deg
     lat = end_point[1] + ny * dist_deg
     candidate = (lon, lat)
+    # 精确修正距离
     actual_dist = haversine(end_point[0], end_point[1], candidate[0], candidate[1]) * 1000
     if abs(actual_dist - distance_m) > 0.1:
         scale = distance_m / actual_dist
@@ -263,43 +259,54 @@ def get_perpendicular_hover_point(end_point, approach_dir, distance_m=10.0, side
     return candidate
 
 def get_safe_hover_point(end_point, approach_dir, obstacles, flight_altitude, distance_m=10.0):
+    """
+    尝试左右两侧，返回一个安全的悬停点（不在障碍物内，且不在航线上）
+    如果两侧都不安全，返回沿反方向偏移的点（可能不安全，但作为最后手段）
+    """
+    candidates = []
     for side in ['left', 'right']:
         pt = get_perpendicular_hover_point(end_point, approach_dir, distance_m, side)
-        # 检查是否在障碍物内或与航线相交（点到线段距离<1米）
+        # 检查是否在障碍物内
         safe = True
         for obs in obstacles:
             if obs.get('height', 50) >= flight_altitude:
                 if point_in_polygon(pt, obs['coordinates']):
                     safe = False
                     break
+        # 检查是否在该航段线上（点到线段距离<1米视作在线上）
+        line_start = (end_point[0] - approach_dir[0]*0.01, end_point[1] - approach_dir[1]*0.01)  # 近似反向一小段
+        line_end = end_point
+        # 简化：检查点是否在以终点为中心的小圆内且与航线方向夹角很小；我们直接检查点到线段距离
+        # 使用点到线段距离公式
+        def point_to_segment_distance(p, a, b):
+            x0,y0=p; x1,y1=a; x2,y2=b
+            dx=x2-x1; dy=y2-y1
+            if dx==0 and dy==0:
+                return haversine(x0,y0,x1,y1)
+            t = ((x0-x1)*dx + (y0-y1)*dy) / (dx*dx+dy*dy)
+            t = max(0, min(1, t))
+            proj_x = x1 + t*dx
+            proj_y = y1 + t*dy
+            return haversine(x0,y0,proj_x,proj_y)
+        d = point_to_segment_distance(pt, line_start, end_point)
+        if d < 0.001:  # 小于1米
+            safe = False
         if safe:
-            # 检查是否离航线太近（终点前一小段）
-            # 简化：检查点到终点与起点连线的距离
-            line_start = (end_point[0] - approach_dir[0]*0.01, end_point[1] - approach_dir[1]*0.01)
-            def point_to_segment_distance(p, a, b):
-                x0,y0=p; x1,y1=a; x2,y2=b
-                dx=x2-x1; dy=y2-y1
-                if dx==0 and dy==0:
-                    return haversine(x0,y0,x1,y1)
-                t = ((x0-x1)*dx + (y0-y1)*dy) / (dx*dx+dy*dy)
-                t = max(0, min(1, t))
-                proj_x = x1 + t*dx
-                proj_y = y1 + t*dy
-                return haversine(x0,y0,proj_x,proj_y)
-            d = point_to_segment_distance(pt, line_start, end_point)
-            if d < 0.001:  # 小于1米
-                safe = False
-        if safe:
-            return pt, True
-    # 回退反方向
-    back_pt = (end_point[0] - approach_dir[0] * distance_m/1000/111.0,
-               end_point[1] - approach_dir[1] * distance_m/1000/111.0)
-    actual = haversine(end_point[0], end_point[1], back_pt[0], back_pt[1])*1000
-    if abs(actual - distance_m) > 0.1:
-        scale = distance_m / actual
-        back_pt = (end_point[0] - approach_dir[0] * distance_m/1000/111.0 * scale,
-                   end_point[1] - approach_dir[1] * distance_m/1000/111.0 * scale)
-    return back_pt, False
+            candidates.append((pt, side))
+    if candidates:
+        # 优先选择左侧（或者任意，这里选第一个）
+        return candidates[0][0], True
+    else:
+        # 回退：沿反方向偏移
+        back_pt = (end_point[0] - approach_dir[0] * distance_m/1000/111.0,
+                   end_point[1] - approach_dir[1] * distance_m/1000/111.0)
+        # 修正距离
+        actual = haversine(end_point[0], end_point[1], back_pt[0], back_pt[1])*1000
+        if abs(actual - distance_m) > 0.1:
+            scale = distance_m / actual
+            back_pt = (end_point[0] - approach_dir[0] * distance_m/1000/111.0 * scale,
+                       end_point[1] - approach_dir[1] * distance_m/1000/111.0 * scale)
+        return back_pt, False
 
 def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km=0.01):
     min_dist = float('inf')
@@ -314,36 +321,6 @@ def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km
     if min_dist < safe_radius_km:
         return False, min_dist, nearest_obs
     return True, min_dist, None
-
-def ensure_segment_safe(seg_start, seg_end, obstacles, flight_altitude, min_dist_m=10.0):
-    """
-    确保线段 seg_start -> seg_end 距离所有障碍物 >= min_dist_m
-    如果不满足，则尝试将终点替换为安全点（递归调整）
-    返回 (new_segments, total_dist, modified)
-    """
-    safe = True
-    for obs in obstacles:
-        if obs.get('height', 50) >= flight_altitude:
-            dist_km = segment_to_polygon_min_distance(seg_start, seg_end, obs['coordinates'])
-            if dist_km * 1000 < min_dist_m:
-                safe = False
-                break
-    if safe:
-        return [(seg_start, seg_end)], haversine(seg_start[0], seg_start[1], seg_end[0], seg_end[1]), False
-    # 否则，在终点附近生成安全悬停点，重新规划最后一段
-    dx = seg_end[0] - seg_start[0]
-    dy = seg_end[1] - seg_start[1]
-    length = sqrt(dx*dx + dy*dy)
-    if length < 1e-9:
-        return [(seg_start, seg_end)], haversine(seg_start[0], seg_start[1], seg_end[0], seg_end[1]), False
-    ux = dx / length
-    uy = dy / length
-    # 尝试垂直方向安全点
-    safe_pt, is_perp = get_safe_hover_point(seg_end, (ux, uy), obstacles, flight_altitude, min_dist_m)
-    # 检查新线段是否安全
-    new_seg = (seg_start, safe_pt)
-    new_dist = haversine(seg_start[0], seg_start[1], safe_pt[0], safe_pt[1])
-    return [new_seg], new_dist, True
 
 # ==================== 障碍物管理 ====================
 def load_obstacles():
@@ -691,7 +668,7 @@ if st.session_state.page == "飞行监控":
             plt.close(fig2)
 
 elif st.session_state.page == "航线规划":
-    st.header("🗺️ 航线规划 · 全程安全距离保障（最后航段≥10米）")
+    st.header("🗺️ 航线规划 · 多路径选择 + 垂直悬停点（避障）")
     
     left_col, right_col = st.columns([1, 2])
     with left_col:
@@ -793,10 +770,10 @@ elif st.session_state.page == "航线规划":
         
         st.divider()
         st.subheader("🛬 降落安全设置")
-        landing_safety = st.checkbox("启用最后航段安全检测（确保整段距离障碍物≥10米）", value=st.session_state.landing_safety)
+        landing_safety = st.checkbox("启用垂直悬停点（距终点10米，垂直于航向并避开障碍物）", value=st.session_state.landing_safety)
         st.session_state.landing_safety = landing_safety
         if landing_safety:
-            st.caption("若最后航段任意点距离障碍物<10米，将自动调整终点至垂直方向10米外安全点。")
+            st.caption("若终点10米内有障碍物，无人机将悬停于航线垂直方向的10米外安全点，避让障碍物和本机航线。")
         
         st.divider()
         st.subheader("🗺️ 地图底图样式")
@@ -836,35 +813,49 @@ elif st.session_state.page == "航线规划":
             else:
                 segments = [(start_point, end_point)]
             
-            # 最后航段安全检测与调整
+            # 降落安全处理：使用垂直悬停点
             hover_point = None
             landing_safe = True
-            if st.session_state.landing_safety and segments:
-                last_seg = segments[-1]
-                seg_start = last_seg[0]
-                seg_end = last_seg[1]
-                # 检查最后一段是否安全
-                new_segs, new_dist, modified = ensure_segment_safe(seg_start, seg_end, st.session_state.obstacles, st.session_state.flight_altitude, min_dist_m=10.0)
-                if modified:
-                    segments = segments[:-1] + new_segs
-                    total_dist = total_dist - haversine(seg_start[0], seg_start[1], seg_end[0], seg_end[1]) + new_dist
-                    hover_point = new_segs[0][1]  # 新终点即为悬停点
-                    landing_safe = False
-                    st.markdown(f'<div class="warning-text-yellow">⚠️ 最后航段存在距障碍物<10米区域，已自动调整终点至安全悬停点（垂直方向10米外）。</div>', unsafe_allow_html=True)
-                else:
-                    # 仍检查终点是否安全（辅助提示）
-                    safe_end, dist_to_obs, obs_name = check_landing_safety(seg_end, st.session_state.obstacles, st.session_state.flight_altitude, 0.01)
-                    if not safe_end:
-                        st.markdown(f'<div class="warning-text-yellow">⚠️ 终点距离障碍物“{obs_name}”仅 {dist_to_obs*1000:.1f} 米，但最后航段整体安全。</div>', unsafe_allow_html=True)
+            if st.session_state.landing_safety and st.session_state.b_point:
+                destination = end_point
+                safe, dist_to_obs, obs_name = check_landing_safety(destination, st.session_state.obstacles, st.session_state.flight_altitude, safe_radius_km=0.01)
+                landing_safe = safe
+                if not safe:
+                    # 获取最后一段航段的方向（从起点指向终点）
+                    if segments:
+                        last_seg = segments[-1]
+                        seg_start = last_seg[0]
+                        seg_end = last_seg[1]
+                        # 计算方向向量（从 seg_start 指向 seg_end）
+                        dx = seg_end[0] - seg_start[0]
+                        dy = seg_end[1] - seg_start[1]
+                        length = sqrt(dx*dx + dy*dy)
+                        if length > 1e-9:
+                            ux = dx / length
+                            uy = dy / length
+                            # 获取安全的垂直悬停点（避开障碍物和航线）
+                            hover_point, is_perp = get_safe_hover_point(seg_end, (ux, uy), st.session_state.obstacles, st.session_state.flight_altitude, distance_m=10.0)
+                            if hover_point:
+                                # 替换最后一段
+                                new_last_seg = (seg_start, hover_point)
+                                segments = segments[:-1] + [new_last_seg]
+                                # 重新计算总距离
+                                total_dist = sum(haversine(s[0][0], s[0][1], s[1][0], s[1][1]) for s in segments)
+                                if is_perp:
+                                    st.markdown(f'<div class="warning-text-yellow">⚠️ 降落点距离障碍物“{obs_name}”仅 {dist_to_obs*1000:.1f} 米，已在垂直方向10米外设置安全悬停点（避开障碍物和航线）。</div>', unsafe_allow_html=True)
+                                else:
+                                    st.markdown(f'<div class="warning-text-yellow">⚠️ 无法找到垂直安全点，已回退至航线反方向10米悬停，请谨慎。</div>', unsafe_allow_html=True)
                     else:
-                        st.markdown(f'<div class="safe-text">✅ 最后航段整体距离障碍物 ≥10 米，终点安全。</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="danger-text">⚠️ 无有效航段，无法设置悬停点。</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="safe-text">✅ 降落点安全，距离最近障碍物 {dist_to_obs*1000:.1f} 米。</div>', unsafe_allow_html=True)
             
             # 显示路径信息
             if avoidance_enabled and blocking:
                 extra = total_dist - original_dist
                 st.markdown(f'<div class="info-text">✨ {st.session_state.route_side} | 总距离 {total_dist:.3f} km (+{extra:.3f} km)</div>', unsafe_allow_html=True)
                 if not landing_safe and hover_point:
-                    st.markdown(f'<div class="warning-text-yellow">✈️ 悬停点已设置于安全位置，请确认后下达降落指令。</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="warning-text-yellow">✈️ 悬停点位于航线垂直方向，已避开障碍物，请确认安全后下达降落指令。</div>', unsafe_allow_html=True)
             elif blocking:
                 st.markdown(f'<div class="danger-text">⚠️ 危险：航线与 {len(blocking)} 个障碍物相交！请启用智能避障</div>', unsafe_allow_html=True)
             else:
@@ -923,16 +914,24 @@ elif st.session_state.page == "航线规划":
                 else:
                     final_segments = [(start_pt, end_pt)]
                 
-                # 最后航段安全处理（同步左侧）
+                # 降落安全处理（同步左侧逻辑）
                 hover_pt = None
-                if st.session_state.landing_safety and final_segments:
-                    last_seg = final_segments[-1]
-                    seg_start = last_seg[0]
-                    seg_end = last_seg[1]
-                    new_segs, _, modified = ensure_segment_safe(seg_start, seg_end, st.session_state.obstacles, st.session_state.flight_altitude, 10.0)
-                    if modified:
-                        final_segments = final_segments[:-1] + new_segs
-                        hover_pt = new_segs[0][1]
+                if st.session_state.landing_safety:
+                    dest = end_pt
+                    safe, _, _ = check_landing_safety(dest, st.session_state.obstacles, st.session_state.flight_altitude, 0.01)
+                    if not safe and final_segments:
+                        last_seg = final_segments[-1]
+                        seg_start = last_seg[0]
+                        seg_end = last_seg[1]
+                        dx = seg_end[0] - seg_start[0]
+                        dy = seg_end[1] - seg_start[1]
+                        length = sqrt(dx*dx + dy*dy)
+                        if length > 1e-9:
+                            ux = dx / length
+                            uy = dy / length
+                            hover_pt, _ = get_safe_hover_point(seg_end, (ux, uy), st.session_state.obstacles, st.session_state.flight_altitude, 10.0)
+                            if hover_pt:
+                                final_segments = final_segments[:-1] + [(seg_start, hover_pt)]
                 
                 # 绘制航段
                 colors = ['#00FF00', '#00BFFF', '#1E90FF', '#32CD32']
@@ -947,7 +946,7 @@ elif st.session_state.page == "航线规划":
                     folium.CircleMarker(location=[wp[1], wp[0]], radius=6, color='orange', fill=True, popup=f"绕行点 {i}").add_to(m)
                 # 悬停点标记
                 if hover_pt:
-                    folium.CircleMarker(location=[hover_pt[1], hover_pt[0]], radius=10, color='purple', fill=True, popup="安全悬停点 (≥10米)", tooltip="悬停点").add_to(m)
+                    folium.CircleMarker(location=[hover_pt[1], hover_pt[0]], radius=10, color='purple', fill=True, popup="悬停点 (垂直10米外)", tooltip="悬停点").add_to(m)
                 # 曲线平滑
                 if st.session_state.curve_smooth and len(polyline_pts) >= 2:
                     try:
@@ -1036,11 +1035,11 @@ elif st.session_state.page == "障碍物管理":
             st.download_button("下载", data=json_str, file_name="obstacles.json")
     with col_right:
         st.info("""
-        📌 **最后航段全程安全检测**
-        - 系统会检查最后一段航线上的所有点，确保与障碍物距离 ≥10 米。
-        - 若存在风险，自动将终点调整至垂直方向10米外且安全的悬停点。
-        - 优先使用垂直侧向点，左右两侧均测试，若均不安全则回退反方向（警告）。
-        - 紫色圆点表示最终安全悬停点。
+        📌 **优化后的垂直悬停点说明**
+        - 当终点10米内有障碍物时，系统会尝试在**垂直于最后航段方向**寻找安全点（距离终点10米）。
+        - 安全点必须满足：不在任何障碍物内部，且不在航线本身上。
+        - 如果两侧均不安全，则回退到沿航线反方向偏移（会给出警告）。
+        - 紫色圆点即为生成的悬停点，地图缩放后可见精确位置。
         """)
 
 elif st.session_state.page == "坐标系设置":
