@@ -108,20 +108,11 @@ def get_polygon_center(polygon):
     lat_sum = sum(p[1] for p in polygon)
     return lng_sum/len(polygon), lat_sum/len(polygon)
 
-def get_polygon_bounds(polygon):
-    min_x = min(p[0] for p in polygon)
-    max_x = max(p[0] for p in polygon)
-    min_y = min(p[1] for p in polygon)
-    max_y = max(p[1] for p in polygon)
-    return min_x, min_y, max_x, max_y
-
 def point_to_polygon_min_distance(point, polygon):
-    """计算点到多边形的最短距离（km）"""
     min_dist = float('inf')
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i+1) % len(polygon)]
-        # 点到线段距离
         x0, y0 = point
         x1, y1 = p1
         x2, y2 = p2
@@ -139,7 +130,7 @@ def point_to_polygon_min_distance(point, polygon):
             min_dist = dist
     return min_dist
 
-# ==================== 多路径避障算法（支持左/右/最优） ====================
+# ==================== 多路径避障算法 ====================
 def point_side_of_line(point, line_start, line_end):
     return (line_end[0] - line_start[0]) * (point[1] - line_start[1]) - (line_end[1] - line_start[1]) * (point[0] - line_start[0])
 
@@ -239,10 +230,6 @@ def bezier_curve(points, num_points=50):
 
 # ==================== 降落安全检测 ====================
 def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km=0.01):
-    """
-    检查降落点周围 safe_radius_km (默认10米) 内是否有障碍物（高度>=飞行高度）
-    返回 (is_safe, nearest_dist_km, nearest_obs_name)
-    """
     min_dist = float('inf')
     nearest_obs = None
     for obs in obstacles:
@@ -270,7 +257,7 @@ def save_obstacles(obstacles):
     with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
         json.dump(obstacles, f, ensure_ascii=False, indent=2)
 
-# ==================== 心跳模拟器（保持不变） ====================
+# ==================== 心跳模拟器 ====================
 class DroneHeartbeatSimulator:
     def __init__(self, timeout_seconds=3):
         self.timeout_seconds = timeout_seconds
@@ -463,7 +450,7 @@ if "route_side" not in st.session_state:
 if "curve_smooth" not in st.session_state:
     st.session_state.curve_smooth = False
 if "landing_safety" not in st.session_state:
-    st.session_state.landing_safety = True   # 新增：降落安全检测开关
+    st.session_state.landing_safety = True
 
 st.title("🚁 无人机实时监控与智能航线规划系统")
 st.markdown('<span class="beijing-badge">🇨🇳 北京时间 (UTC+8)</span>', unsafe_allow_html=True)
@@ -760,19 +747,15 @@ elif st.session_state.page == "航线规划":
                         last_seg = segments[-1]
                         last_start = last_seg[0]
                         last_end = last_seg[1]
-                        # 方向从终点指向路径最后一点
                         dx = last_start[0] - last_end[0]
                         dy = last_start[1] - last_end[1]
                         length = sqrt(dx*dx + dy*dy)
                         if length > 1e-9:
                             ux = dx / length
                             uy = dy / length
-                            # 后退 0.01 km = 10米
                             hover_lon = last_end[0] + ux * 0.01
                             hover_lat = last_end[1] + uy * 0.01
                             hover_point = (hover_lon, hover_lat)
-                            # 修改最后一段为到悬停点，并添加悬停点到终点段？实际上悬停点代替终点，终点不再降落
-                            # 我们设计：航线终点为悬停点，并标记警告
                             new_last_seg = (last_start, hover_point)
                             segments = segments[:-1] + [new_last_seg]
                             total_dist = total_dist - haversine(last_start[0], last_start[1], last_end[0], last_end[1]) + haversine(last_start[0], last_start[1], hover_lon, hover_lat)
@@ -829,7 +812,6 @@ elif st.session_state.page == "航线规划":
                 start_pt = (st.session_state.a_point['lon_gcj'], st.session_state.a_point['lat_gcj'])
                 end_pt = (st.session_state.b_point['lon_gcj'], st.session_state.b_point['lat_gcj'])
                 
-                # 重新计算路径（与左侧逻辑一致，避免重复代码，但这里为简化，直接用已有逻辑）
                 need_avoid = False
                 if st.session_state.avoidance_enabled:
                     for obs in st.session_state.obstacles:
@@ -845,7 +827,7 @@ elif st.session_state.page == "航线规划":
                 else:
                     final_segments = [(start_pt, end_pt)]
                 
-                # 降落安全处理：如果启用了降落安全且不安全，需要调整路径终点为悬停点
+                # 降落安全处理
                 hover_pt = None
                 if st.session_state.landing_safety:
                     dest = end_pt
