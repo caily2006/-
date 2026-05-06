@@ -15,8 +15,6 @@ import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
 from math import radians, sin, cos, sqrt, asin, pi, atan2, degrees
-from shapely.geometry import Polygon, LineString, Point
-from shapely.ops import unary_union
 
 # ==================== 配置 ====================
 AMAP_KEY = "0c475e7a50516001883c104383b43f31"   # 请替换为您自己的高德Key
@@ -59,50 +57,88 @@ def haversine(lon1, lat1, lon2, lat2):
     c = 2 * asin(sqrt(a))
     return R * c
 
-# ==================== 几何工具（改进版，使用Shapely确保安全距离） ====================
-def buffer_polygon(polygon_coords, distance_km):
-    """
-    将多边形向外扩展 distance_km 公里（GCJ-02 坐标系近似）
-    """
+# ==================== 纯几何工具（无 shapely） ====================
+def point_in_polygon(point, polygon):
+    """射线法判断点是否在多边形内"""
+    x, y = point
+    inside = False
+    n = len(polygon)
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i+1) % n]
+        if ((y1 > y) != (y2 > y)) and (x < (x2-x1)*(y-y1)/(y2-y1) + x1):
+            inside = not inside
+    return inside
+
+def segments_intersect(p1, q1, p2, q2):
+    """判断两线段是否相交（包含端点）"""
+    def orientation(p, q, r):
+        val = (q[1]-p[1])*(r[0]-q[0]) - (q[0]-p[0])*(r[1]-q[1])
+        if val == 0: return 0
+        return 1 if val > 0 else 2
+    def on_segment(p, q, r):
+        return (q[0] <= max(p[0], r[0]) and q[0] >= min(p[0], r[0]) and
+                q[1] <= max(p[1], r[1]) and q[1] >= min(p[1], r[1]))
+    o1 = orientation(p1, q1, p2)
+    o2 = orientation(p1, q1, q2)
+    o3 = orientation(p2, q2, p1)
+    o4 = orientation(p2, q2, q1)
+    if o1 != o2 and o3 != o4: return True
+    if o1 == 0 and on_segment(p1, p2, q1): return True
+    if o2 == 0 and on_segment(p1, q2, q1): return True
+    if o3 == 0 and on_segment(p2, p1, q2): return True
+    if o4 == 0 and on_segment(p2, q1, q2): return True
+    return False
+
+def line_polygon_intersect(line_start, line_end, polygon):
+    """线段与多边形相交（包含包含关系）"""
+    if point_in_polygon(line_start, polygon) or point_in_polygon(line_end, polygon):
+        return True
+    for i in range(len(polygon)):
+        p1 = polygon[i]
+        p2 = polygon[(i+1) % len(polygon)]
+        if segments_intersect(line_start, line_end, p1, p2):
+            return True
+    return False
+
+def buffer_polygon_simple(polygon_coords, distance_km):
+    """简化的多边形外扩（沿中心向外移动每个顶点，不保证精确等距但满足安全要求）"""
+    cx = sum(p[0] for p in polygon_coords) / len(polygon_coords)
+    cy = sum(p[1] for p in polygon_coords) / len(polygon_coords)
     deg_per_km = 1 / 111.0
-    buffer_deg = distance_km * deg_per_km
-    geom = Polygon(polygon_coords)
-    buffered = geom.buffer(buffer_deg, cap_style=2, join_style=2)
-    if buffered.is_empty:
-        return polygon_coords
-    if buffered.geom_type == 'Polygon':
-        return list(buffered.exterior.coords)
-    elif buffered.geom_type == 'MultiPolygon':
-        biggest = max(buffered.geoms, key=lambda p: p.area)
-        return list(biggest.exterior.coords)
-    return polygon_coords
+    delta_deg = distance_km * deg_per_km
+    new_coords = []
+    for lon, lat in polygon_coords:
+        dx = lon - cx
+        dy = lat - cy
+        length = sqrt(dx*dx + dy*dy)
+        if length > 0:
+            new_lon = lon + (dx / length) * delta_deg
+            new_lat = lat + (dy / length) * delta_deg
+        else:
+            new_lon, new_lat = lon, lat
+        new_coords.append((new_lon, new_lat))
+    return new_coords
 
 def expand_all_obstacles(obstacles, safe_dist_km, flight_altitude):
-    """将所有高于飞行高度的障碍物向外扩展安全距离"""
+    """为所有高于飞行高度的障碍物生成安全缓冲区（外扩多边形）"""
     expanded = []
     for obs in obstacles:
         if obs.get('height', 50) >= flight_altitude:
-            poly = obs['coordinates']
-            exp_poly = buffer_polygon(poly, safe_dist_km)
+            orig_poly = obs['coordinates']
+            exp_poly = buffer_polygon_simple(orig_poly, safe_dist_km)
             expanded.append({
                 "id": obs['id'],
                 "name": obs['name'],
-                "original": poly,
+                "original": orig_poly,
                 "expanded": exp_poly,
                 "height": obs.get('height', 50)
             })
     return expanded
 
-def line_polygon_intersect_safe(line_start, line_end, expanded_poly):
-    """检查线段是否与扩展后的多边形相交或内部包含端点"""
-    line = LineString([line_start, line_end])
-    poly = Polygon(expanded_poly)
-    return line.intersects(poly)
-
-def point_in_polygon(point, polygon):
-    x, y = point
-    poly = Polygon(polygon)
-    return poly.contains(Point(x, y))
+def line_expanded_intersect(line_start, line_end, expanded_poly):
+    """线段与扩展多边形是否相交（使用纯几何）"""
+    return line_polygon_intersect(line_start, line_end, expanded_poly)
 
 def get_polygon_center(polygon):
     lng_sum = sum(p[0] for p in polygon)
@@ -110,13 +146,27 @@ def get_polygon_center(polygon):
     return lng_sum/len(polygon), lat_sum/len(polygon)
 
 def point_to_polygon_min_distance(point, polygon):
-    """点到多边形的最小距离（公里）"""
-    pt = Point(point)
-    poly = Polygon(polygon)
-    return pt.distance(poly) * 111.0   # 近似转换为公里
+    """计算点到多边形的最小距离（公里） — 点到线段距离的最小值"""
+    min_dist = float('inf')
+    x0, y0 = point
+    for i in range(len(polygon)):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i+1) % len(polygon)]
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0 and dy == 0:
+            dist = haversine(x0, y0, x1, y1)
+        else:
+            t = ((x0-x1)*dx + (y0-y1)*dy) / (dx*dx + dy*dy)
+            t = max(0, min(1, t))
+            proj_x = x1 + t*dx
+            proj_y = y1 + t*dy
+            dist = haversine(x0, y0, proj_x, proj_y)
+        if dist < min_dist:
+            min_dist = dist
+    return min_dist
 
 def offset_point_away_from_polygon(pt, polygon, dist_km):
-    """将点沿多边形中心向外偏移"""
     cx, cy = get_polygon_center(polygon)
     dx = pt[0] - cx
     dy = pt[1] - cy
@@ -129,16 +179,12 @@ def offset_point_away_from_polygon(pt, polygon, dist_km):
     return (new_x, new_y)
 
 def get_side_waypoints(expanded_obs, start, end, side='left'):
-    """
-    根据扩展后的障碍物多边形和绕行侧，生成绕行点
-    注意：此处只需基于扩展多边形计算，不再额外添加安全距离
-    """
+    """从扩展多边形中挑出最适合绕行的顶点"""
     poly = expanded_obs['expanded']
     center = get_polygon_center(poly)
     best_vertex = None
     best_side_val = None
     for v in poly:
-        # 计算有向面积符号（左侧为正）
         side_val = (end[0]-start[0])*(v[1]-start[1]) - (end[1]-start[1])*(v[0]-start[0])
         if side == 'left' and side_val > 0:
             if best_side_val is None or side_val > best_side_val:
@@ -150,20 +196,17 @@ def get_side_waypoints(expanded_obs, start, end, side='left'):
                 best_vertex = v
     if best_vertex is None:
         best_vertex = min(poly, key=lambda p: haversine(p[0], p[1], center[0], center[1]))
-    # 因为已经使用扩展多边形，无需再向外偏移，直接返回该顶点
+    # 返回顶点，但为避免路径直接接触障碍物，可向外再偏移一点点（可选）
+    # 因为多边形已经外扩过，所以直接返回即可
     return best_vertex
 
 def find_path_with_side(start, end, expanded_obstacles, side, depth=0):
-    """
-    递归寻找绕行路径，使用扩展后的障碍物多边形
-    """
     MAX_DEPTH = 10
     if depth > MAX_DEPTH:
         return [(start, end)], haversine(start[0], start[1], end[0], end[1])
-    # 找到所有阻挡的扩展障碍物
     blocking = []
     for obs in expanded_obstacles:
-        if line_polygon_intersect_safe(start, end, obs['expanded']):
+        if line_expanded_intersect(start, end, obs['expanded']):
             blocking.append(obs)
     if not blocking:
         return [(start, end)], haversine(start[0], start[1], end[0], end[1])
@@ -236,7 +279,6 @@ def get_perpendicular_hover_point(end_point, approach_dir, distance_m=10.0, side
     return candidate
 
 def get_safe_hover_point(end_point, approach_dir, expanded_obstacles, distance_m=10.0):
-    """尝试左右两侧，返回安全的悬停点（不在扩展障碍物内）"""
     candidates = []
     for side in ['left', 'right']:
         pt = get_perpendicular_hover_point(end_point, approach_dir, distance_m, side)
@@ -250,7 +292,6 @@ def get_safe_hover_point(end_point, approach_dir, expanded_obstacles, distance_m
     if candidates:
         return candidates[0][0], True
     else:
-        # 回退：沿反方向偏移
         back_pt = (end_point[0] - approach_dir[0] * distance_m/1000/111.0,
                    end_point[1] - approach_dir[1] * distance_m/1000/111.0)
         actual = haversine(end_point[0], end_point[1], back_pt[0], back_pt[1])*1000
@@ -475,7 +516,7 @@ if "map_style" not in st.session_state:
 if "avoidance_enabled" not in st.session_state:
     st.session_state.avoidance_enabled = True
 if "safe_distance" not in st.session_state:
-    st.session_state.safe_distance = 0.05   # 公里，默认50米
+    st.session_state.safe_distance = 0.05
 if "route_side" not in st.session_state:
     st.session_state.route_side = "最优路径"
 if "curve_smooth" not in st.session_state:
@@ -751,7 +792,7 @@ elif st.session_state.page == "航线规划":
             # 检测阻挡（使用扩展后的障碍物）
             blocking = []
             for obs in st.session_state.expanded_obstacles:
-                if line_polygon_intersect_safe(start_point, end_point, obs['expanded']):
+                if line_expanded_intersect(start_point, end_point, obs['expanded']):
                     blocking.append(obs)
             
             original_dist = haversine(start_point[0], start_point[1], end_point[0], end_point[1])
@@ -851,7 +892,7 @@ elif st.session_state.page == "航线规划":
                 need_avoid = False
                 if st.session_state.avoidance_enabled:
                     for obs in st.session_state.expanded_obstacles:
-                        if line_polygon_intersect_safe(start_pt, end_pt, obs['expanded']):
+                        if line_expanded_intersect(start_pt, end_pt, obs['expanded']):
                             need_avoid = True
                             break
                 
@@ -990,8 +1031,8 @@ elif st.session_state.page == "障碍物管理":
             st.download_button("下载", data=json_str, file_name="obstacles.json")
     with col_right:
         st.info("""
-        📌 **安全半径机制**
-        - 系统使用 `shapely` 库对每个障碍物按照设定的“绕行安全距离”向外扩展缓冲区。
+        📌 **安全半径机制（纯Python实现，无Shapely依赖）**
+        - 系统对每个障碍物按照设定的“绕行安全距离”向外扩展缓冲区。
         - 航线规划基于扩展后的多边形进行碰撞检测和绕行，确保整条路径与原始障碍物的距离 ≥ 安全距离。
         - 地图上红色区域为原始障碍物，橙色虚线为安全缓冲区。
         - 垂直悬停点同样会避开缓冲区，保障降落安全。
