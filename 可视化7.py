@@ -302,7 +302,7 @@ def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km
         return False, min_dist, nearest_obs
     return True, min_dist, None
 
-# ==================== 飞行监控模拟器 ====================
+# ==================== 飞行监控模拟器（任务执行） ====================
 class FlightSimulator:
     def __init__(self, waypoints, speed_mps=8.5):
         self.waypoints = waypoints
@@ -370,20 +370,6 @@ class FlightSimulator:
                 dist_accum += seg_dist
         progress = self.dist_traveled / self.total_distance if self.total_distance > 0 else 1
         self.battery_percent = max(0, 100 * (1 - progress * 0.95))
-
-# ==================== 障碍物管理 ====================
-def load_obstacles():
-    if os.path.exists(OBSTACLE_FILE):
-        try:
-            with open(OBSTACLE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return []
-    return []
-
-def save_obstacles(obstacles):
-    with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(obstacles, f, ensure_ascii=False, indent=2)
 
 # ==================== 心跳模拟器 ====================
 class DroneHeartbeatSimulator:
@@ -527,6 +513,20 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
     plt.tight_layout()
     return fig
 
+# ==================== 障碍物管理 ====================
+def load_obstacles():
+    if os.path.exists(OBSTACLE_FILE):
+        try:
+            with open(OBSTACLE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_obstacles(obstacles):
+    with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(obstacles, f, ensure_ascii=False, indent=2)
+
 # ==================== Streamlit 界面 ====================
 st.set_page_config(page_title="无人机监控与智能航线规划", layout="wide", page_icon="🚁")
 
@@ -563,7 +563,7 @@ if "b_point" not in st.session_state:
 if "input_coordinate_system" not in st.session_state:
     st.session_state.input_coordinate_system = "WGS-84"
 if "page" not in st.session_state:
-    st.session_state.page = "飞行监控"
+    st.session_state.page = "心跳监控"
 if "obstacles" not in st.session_state:
     st.session_state.obstacles = load_obstacles()
 if "flight_altitude" not in st.session_state:
@@ -639,8 +639,8 @@ with st.sidebar:
     refresh_rate = st.selectbox("刷新频率（秒）", [1, 2, 3, 5], index=0)
     st.divider()
     st.subheader("🧭 功能页面")
-    page = st.radio("跳转", ["飞行监控", "航线规划", "障碍物管理", "坐标系设置"], 
-                    index=["飞行监控", "航线规划", "障碍物管理", "坐标系设置"].index(st.session_state.page))
+    page = st.radio("跳转", ["心跳监控", "任务执行", "航线规划", "障碍物管理", "坐标系设置"], 
+                    index=["心跳监控", "任务执行", "航线规划", "障碍物管理", "坐标系设置"].index(st.session_state.page))
     st.session_state.page = page
 
 # ==================== 自动心跳生成 ====================
@@ -654,11 +654,76 @@ if st.session_state.running:
         else:
             st.toast(f"⚠️ 心跳丢失", icon="⚠️")
 
-# ==================== 飞行监控页面 ====================
-if st.session_state.page == "飞行监控":
+# ==================== 页面1：心跳监控 ====================
+if st.session_state.page == "心跳监控":
+    st.header("📡 心跳监控 · 实时心跳数据")
+    sim = st.session_state.simulator
+    stats = sim.get_statistics()
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("📊 成功接收", stats['received_count'])
+    c2.metric("⚠️ 超时事件", len(sim.timeout_events))
+    c3.metric("⏱️ 平均延迟", f"{stats['avg_delay']:.1f} ms", delta=f"{stats['min_delay']:.0f}-{stats['max_delay']:.0f}ms")
+    c4.metric("📉 丢包率", f"{stats['packet_loss_rate']:.1f}%")
+    c5.metric("⏰ 运行时长", f"{int((time.time()-sim.start_time)//60)}分{int((time.time()-sim.start_time)%60)}秒")
+    st.markdown("---")
+    try:
+        seq, delay, rtimes = sim.get_recent_data(30)
+        fig = create_heartbeat_charts(seq, delay, rtimes, len(sim.timeout_events), sim.timeout_events)
+        st.pyplot(fig)
+        plt.close(fig)
+    except Exception as e:
+        st.error(f"图表错误: {e}")
+    col_left, col_right = st.columns(2)
+    with col_left:
+        st.subheader("📡 最新心跳信息")
+        if sim.heartbeat_history:
+            latest = sim.heartbeat_history[-1]
+            st.markdown(f"- **序号**: {latest.get('sequence', 'N/A')}")
+            st.markdown(f"- **延迟**: {latest.get('delay_ms', 0):.1f} ms")
+            st.markdown(f"- **接收时间**: {format_beijing_time(latest.get('receive_time'))}")
+            delay_val = latest.get('delay_ms', 0)
+            if delay_val < 200:
+                st.success("✅ 延迟状态: 优秀 (<200ms)")
+            elif delay_val < 400:
+                st.warning("⚠️ 延迟状态: 良好 (200-400ms)")
+            else:
+                st.error("🔴 延迟状态: 较差 (>400ms)")
+        else:
+            st.info("等待数据...")
+    with col_right:
+        st.subheader("⚠️ 最近超时事件")
+        if sim.timeout_events:
+            df_timeout = pd.DataFrame([{
+                "时间": e['time'].strftime('%H:%M:%S'),
+                "持续": f"{e['duration']:.1f}秒"
+            } for e in list(sim.timeout_events)[-5:] if e and isinstance(e, dict)])
+            st.dataframe(df_timeout, use_container_width=True)
+            now = sim.get_beijing_time()
+            if any((now - e['time']).total_seconds() < 10 for e in sim.timeout_events if e and 'time' in e):
+                st.markdown('<p class="warning-text">⚠️ 最近10秒内有超时发生！</p>', unsafe_allow_html=True)
+        else:
+            st.success("✅ 无超时事件")
+    st.subheader("📊 传输统计")
+    if sim.heartbeat_history:
+        delays_hist = [r['delay_ms'] for r in list(sim.heartbeat_history)[-50:] if isinstance(r, dict) and 'delay_ms' in r]
+        if delays_hist:
+            fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+            ax1.hist(delays_hist, bins=20, color='skyblue', edgecolor='black')
+            ax1.axvline(x=400, color='red', linestyle='--', label='阈值400ms')
+            ax1.set_xlabel('延迟 (ms)'); ax1.set_ylabel('频次'); ax1.set_title('延迟分布'); ax1.legend()
+            ax2.plot(rtimes[-50:], delays_hist, 'b-', alpha=0.7)
+            ax2.scatter(rtimes[-50:], delays_hist, c='red', s=30, alpha=0.5)
+            ax2.set_xlabel('接收时间（北京时间）'); ax2.set_ylabel('延迟 (ms)'); ax2.set_title('延迟变化趋势')
+            ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
+            plt.tight_layout()
+            st.pyplot(fig2)
+            plt.close(fig2)
+
+# ==================== 页面2：任务执行 ====================
+elif st.session_state.page == "任务执行":
     st.header("✈️ 飞行实时画面 - 任务执行监控")
     
-    # 如果没有规划航点，提示并简单生成直线航点（演示）
     if not st.session_state.planned_waypoints:
         if st.session_state.a_point and st.session_state.b_point:
             start_pt = (st.session_state.a_point['lon_gcj'], st.session_state.a_point['lat_gcj'])
@@ -669,11 +734,9 @@ if st.session_state.page == "飞行监控":
             st.warning("⚠️ 请先在「航线规划」页面设置A点和B点并生成航线。")
             st.stop()
     
-    # 初始化/更新飞行模拟器
     if st.session_state.flight_sim is None or st.session_state.flight_sim.waypoints != st.session_state.planned_waypoints:
         st.session_state.flight_sim = FlightSimulator(st.session_state.planned_waypoints, speed_mps=st.session_state.flight_speed)
     
-    # 控制按钮
     col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
     with col_btn1:
         if st.button("▶ 开始任务", use_container_width=True, type="primary"):
@@ -693,11 +756,9 @@ if st.session_state.page == "飞行监控":
             st.session_state.flight_sim.stop()
             st.session_state.flight_sim = FlightSimulator(st.session_state.planned_waypoints, speed_mps=st.session_state.flight_speed)
     
-    # 状态指示
     status_text = "▶ 飞行中" if st.session_state.flight_sim.is_running else ("⏸ 已暂停" if st.session_state.flight_sim.is_paused else "⏹ 已停止")
     st.markdown(f"<div style='text-align:center; font-size:20px; margin:10px 0;'>{status_text}</div>", unsafe_allow_html=True)
     
-    # 计量卡片
     col1, col2, col3, col4, col5 = st.columns(5)
     total_wp = len(st.session_state.planned_waypoints)
     current_wp = min(st.session_state.flight_sim.current_index + 1, total_wp)
@@ -717,7 +778,6 @@ if st.session_state.page == "飞行监控":
     st.metric("🔋 电量模拟", f"{st.session_state.flight_sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     
-    # 实时地图
     st.subheader("实时飞行地图")
     center_lat, center_lon = st.session_state.flight_sim.current_pos[1], st.session_state.flight_sim.current_pos[0]
     if st.session_state.map_style == "卫星影像":
@@ -727,10 +787,10 @@ if st.session_state.page == "飞行监控":
         tiles_url = f"https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
         attr = "高德矢量街道图"
     m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles=tiles_url, attr=attr)
-    # 规划航线（蓝）
+    
     line_points = [[p[1], p[0]] for p in st.session_state.planned_waypoints]
     folium.PolyLine(line_points, color="blue", weight=3, opacity=0.6, tooltip="规划航线").add_to(m)
-    # 已飞路径（绿）
+    
     if st.session_state.flight_sim.dist_traveled > 0:
         flown = []
         dist_acc = 0
@@ -749,16 +809,15 @@ if st.session_state.page == "飞行监控":
         if flown:
             flown_path = [[p[1], p[0]] for p in flown]
             folium.PolyLine(flown_path, color="green", weight=5, opacity=0.9, tooltip="已飞路径").add_to(m)
-    # 当前位置
+    
     folium.Marker(location=[st.session_state.flight_sim.current_pos[1], st.session_state.flight_sim.current_pos[0]],
                   icon=folium.Icon(color='red', icon='plane', prefix='fa'), popup="当前位置").add_to(m)
-    # 起点终点
     if st.session_state.planned_waypoints:
         start = st.session_state.planned_waypoints[0]
         end = st.session_state.planned_waypoints[-1]
         folium.Marker(location=[start[1], start[0]], icon=folium.Icon(color='green', icon='play', prefix='fa'), popup="起点").add_to(m)
         folium.Marker(location=[end[1], end[0]], icon=folium.Icon(color='red', icon='stop', prefix='fa'), popup="终点").add_to(m)
-    # 障碍物
+    
     if st.checkbox("显示障碍物", value=True):
         for obs in st.session_state.obstacles:
             coords = [[lat, lng] for lng, lat in obs['coordinates']]
@@ -767,12 +826,11 @@ if st.session_state.page == "飞行监控":
             folium.Polygon(locations=coords, color=color, weight=2, fill=True, fill_opacity=0.2, popup=f"{obs['name']} ({height}m)").add_to(m)
     st_folium(m, width=700, height=500, key="flight_map")
     
-    # 自动刷新
     if st.session_state.flight_sim.is_running:
         time.sleep(0.5)
         st.rerun()
 
-# ==================== 航线规划页面 ====================
+# ==================== 页面3：航线规划 ====================
 elif st.session_state.page == "航线规划":
     st.header("🗺️ 航线规划 · 多路径选择 + 垂直悬停点")
     
@@ -895,7 +953,6 @@ elif st.session_state.page == "航线规划":
             start_point = (st.session_state.a_point['lon_gcj'], st.session_state.a_point['lat_gcj'])
             end_point = (st.session_state.b_point['lon_gcj'], st.session_state.b_point['lat_gcj'])
             
-            # 检测阻挡
             blocking = []
             for obs in st.session_state.obstacles:
                 if obs.get('height', 50) >= st.session_state.flight_altitude:
@@ -903,7 +960,6 @@ elif st.session_state.page == "航线规划":
                     if line_polygon_intersect(start_point, end_point, poly):
                         blocking.append(obs)
             
-            # 路径规划
             original_dist = haversine(start_point[0], start_point[1], end_point[0], end_point[1])
             segments = []
             total_dist = original_dist
@@ -919,7 +975,7 @@ elif st.session_state.page == "航线规划":
             else:
                 segments = [(start_point, end_point)]
             
-            # 构建航点列表（用于飞行监控）
+            # 存储航点
             waypoints = []
             for seg in segments:
                 if not waypoints:
@@ -927,12 +983,10 @@ elif st.session_state.page == "航线规划":
                 waypoints.append(seg[1])
             st.session_state.planned_waypoints = waypoints
             
-            # 降落安全处理：垂直悬停点
+            # 降落安全处理（仅影响显示和提示，航点已更新）
             hover_point = None
-            landing_safe = True
             if st.session_state.landing_safety and st.session_state.b_point:
                 safe, dist_to_obs, obs_name = check_landing_safety(end_point, st.session_state.obstacles, st.session_state.flight_altitude, safe_radius_km=0.01)
-                landing_safe = safe
                 if not safe:
                     last_seg = segments[-1]
                     seg_start = last_seg[0]
@@ -945,7 +999,6 @@ elif st.session_state.page == "航线规划":
                         uy = dy / length
                         hover_point, is_perp = get_safe_hover_point(seg_end, (ux, uy), st.session_state.obstacles, st.session_state.flight_altitude, distance_m=10.0)
                         if hover_point:
-                            # 更新航点列表
                             st.session_state.planned_waypoints = st.session_state.planned_waypoints[:-1] + [hover_point]
                             st.markdown(f'<div class="warning-text-yellow">⚠️ 降落点距离障碍物“{obs_name}”仅 {dist_to_obs*1000:.1f} 米，已在垂直方向10米外设置悬停点。</div>', unsafe_allow_html=True)
                         else:
@@ -953,7 +1006,6 @@ elif st.session_state.page == "航线规划":
                 else:
                     st.markdown(f'<div class="safe-text">✅ 降落点安全，距离最近障碍物 {dist_to_obs*1000:.1f} 米。</div>', unsafe_allow_html=True)
             
-            # 显示路径信息
             if avoidance_enabled and blocking:
                 extra = total_dist - original_dist
                 st.markdown(f'<div class="info-text">✨ {st.session_state.route_side} | 总距离 {total_dist:.3f} km (+{extra:.3f} km)</div>', unsafe_allow_html=True)
@@ -987,7 +1039,6 @@ elif st.session_state.page == "航线规划":
             
             m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles=tiles_url, attr=attr)
             
-            # 标记点
             for point in st.session_state.map_points:
                 folium.Marker(location=[point['lat_gcj'], point['lon_gcj']], popup=point['name'], icon=folium.Icon(color='blue')).add_to(m)
             if st.session_state.a_point:
@@ -995,7 +1046,6 @@ elif st.session_state.page == "航线规划":
             if st.session_state.b_point:
                 folium.Marker(location=[st.session_state.b_point['lat_gcj'], st.session_state.b_point['lon_gcj']], popup="B点", icon=folium.Icon(color='red', icon='stop', prefix='fa')).add_to(m)
             
-            # 绘制航线
             if st.session_state.a_point and st.session_state.b_point:
                 start_pt = (st.session_state.a_point['lon_gcj'], st.session_state.a_point['lat_gcj'])
                 end_pt = (st.session_state.b_point['lon_gcj'], st.session_state.b_point['lat_gcj'])
@@ -1015,8 +1065,8 @@ elif st.session_state.page == "航线规划":
                 else:
                     final_segments = [(start_pt, end_pt)]
                 
-                # 降落安全处理（仅用于显示）
-                hover_pt = None
+                # 用于显示的悬停点（与存储逻辑分离）
+                display_hover = None
                 if st.session_state.landing_safety:
                     safe, _, _ = check_landing_safety(end_pt, st.session_state.obstacles, st.session_state.flight_altitude, 0.01)
                     if not safe and final_segments:
@@ -1029,25 +1079,22 @@ elif st.session_state.page == "航线规划":
                         if length > 1e-9:
                             ux = dx / length
                             uy = dy / length
-                            hover_pt, _ = get_safe_hover_point(seg_end, (ux, uy), st.session_state.obstacles, st.session_state.flight_altitude, 10.0)
-                            if hover_pt:
-                                final_segments = final_segments[:-1] + [(seg_start, hover_pt)]
+                            display_hover, _ = get_safe_hover_point(seg_end, (ux, uy), st.session_state.obstacles, st.session_state.flight_altitude, 10.0)
+                            if display_hover:
+                                # 仅用于显示，不改变存储的 waypoints 以免重复
+                                final_segments = final_segments[:-1] + [(seg_start, display_hover)]
                 
-                # 绘制航段
                 colors = ['#00FF00', '#00BFFF', '#1E90FF', '#32CD32']
                 polyline_pts = [final_segments[0][0]]
                 for seg in final_segments:
                     polyline_pts.append(seg[1])
                     line_pts = [[seg[0][1], seg[0][0]], [seg[1][1], seg[1][0]]]
                     folium.PolyLine(line_pts, color=colors[len(polyline_pts)%len(colors)], weight=4, opacity=0.8).add_to(m)
-                # 绕行点
                 for i in range(1, len(polyline_pts)-1):
                     wp = polyline_pts[i]
                     folium.CircleMarker(location=[wp[1], wp[0]], radius=6, color='orange', fill=True, popup=f"绕行点 {i}").add_to(m)
-                # 悬停点
-                if hover_pt:
-                    folium.CircleMarker(location=[hover_pt[1], hover_pt[0]], radius=10, color='purple', fill=True, popup="悬停点 (垂直10m)").add_to(m)
-                # 曲线平滑
+                if display_hover:
+                    folium.CircleMarker(location=[display_hover[1], display_hover[0]], radius=10, color='purple', fill=True, popup="悬停点 (垂直10m)").add_to(m)
                 if st.session_state.curve_smooth and len(polyline_pts) >= 2:
                     try:
                         smooth_pts = bezier_curve(polyline_pts, num_points=100)
@@ -1055,7 +1102,6 @@ elif st.session_state.page == "航线规划":
                         folium.PolyLine(smooth_line, color='#FF69B4', weight=3, opacity=0.7, dash_array='5,5').add_to(m)
                     except:
                         pass
-                # 距离标签
                 total_dist = sum(haversine(s[0][0], s[0][1], s[1][0], s[1][1]) for s in final_segments)
                 original_dist = haversine(start_pt[0], start_pt[1], end_pt[0], end_pt[1])
                 extra = total_dist - original_dist
@@ -1064,7 +1110,6 @@ elif st.session_state.page == "航线规划":
                     icon=folium.DivIcon(html=f'<div style="font-size:11px; background:rgba(0,0,0,0.7); color:white; padding:2px 6px; border-radius:12px;">✈️ {total_dist:.2f}km (+{extra:.2f})</div>')
                 ).add_to(m)
             
-            # 障碍物显示
             if show_obstacles:
                 for obs in st.session_state.obstacles:
                     coords = [[lat, lng] for lng, lat in obs['coordinates']]
@@ -1072,7 +1117,6 @@ elif st.session_state.page == "航线规划":
                     color = 'darkred' if height >= st.session_state.flight_altitude else 'red'
                     folium.Polygon(locations=coords, color=color, weight=3, fill=True, fill_opacity=0.3, popup=f"{obs['name']}<br>高度: {height}m").add_to(m)
             
-            # 绘图控件
             draw = Draw(draw_options={'polygon': {'allowIntersection': False, 'showArea': True}}, edit_options={'edit': True, 'remove': True})
             draw.add_to(m)
             output = st_folium(m, width=700, height=500, key="planning_map")
@@ -1088,7 +1132,7 @@ elif st.session_state.page == "航线规划":
                     st.success(f"已添加: {new_name}")
                     st.rerun()
 
-# ==================== 障碍物管理页面 ====================
+# ==================== 页面4：障碍物管理 ====================
 elif st.session_state.page == "障碍物管理":
     st.header("⛔ 障碍物管理")
     col_left, col_right = st.columns([1, 2])
@@ -1138,7 +1182,7 @@ elif st.session_state.page == "障碍物管理":
         - 高度设置影响避障和降落安全检测。
         """)
 
-# ==================== 坐标系设置页面 ====================
+# ==================== 页面5：坐标系设置 ====================
 elif st.session_state.page == "坐标系设置":
     st.header("🌐 坐标系设置")
     crs = st.radio("输入坐标系", ["WGS-84", "GCJ-02"], 
