@@ -527,6 +527,50 @@ def save_obstacles(obstacles):
     with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
         json.dump(obstacles, f, ensure_ascii=False, indent=2)
 
+# ==================== 通信链路拓扑HTML组件 ====================
+def link_topology_html(delay_ms, loss_rate):
+    return f"""
+    <div style="background: #1e1e2f; border-radius: 12px; padding: 15px; color: white; font-family: monospace;">
+        <div style="display: flex; justify-content: space-around; align-items: center; margin-bottom: 20px;">
+            <div style="text-align: center;">
+                <div style="font-size: 24px;">🖥️</div>
+                <div><b>GCS</b></div>
+                <div style="font-size: 12px; color: #aaa;">地面站</div>
+                <div style="font-size: 11px;">192.168.1.100</div>
+                <div style="color: #4CAF50;">● 已连接</div>
+            </div>
+            <div style="font-size: 20px;">→</div>
+            <div style="text-align: center;">
+                <div style="font-size: 24px;">💻</div>
+                <div><b>OBC</b></div>
+                <div style="font-size: 12px; color: #aaa;">机载计算机</div>
+                <div style="font-size: 11px;">Raspberry Pi 4</div>
+                <div style="color: #4CAF50;">● 已连接</div>
+            </div>
+            <div style="font-size: 20px;">→</div>
+            <div style="text-align: center;">
+                <div style="font-size: 24px;">🛸</div>
+                <div><b>FCU</b></div>
+                <div style="font-size: 12px; color: #aaa;">飞控</div>
+                <div style="font-size: 11px;">PX4/ArduPilot</div>
+                <div style="color: #4CAF50;">● 已连接</div>
+            </div>
+        </div>
+        <div style="background: #2a2a3a; border-radius: 8px; padding: 10px; margin-top: 10px;">
+            <div style="display: flex; justify-content: space-between;">
+                <span><b>链路统计</b></span>
+                <span>📡 UDP:14550</span>
+                <span>⚡ MAVLink</span>
+            </div>
+            <hr style="border-color: #444;">
+            <div>📶 GCS ↔ OBC : <span style="color:#4CAF50;">正常</span></div>
+            <div>📶 OBC ↔ FCU : <span style="color:#4CAF50;">正常</span></div>
+            <div>⏱️ 延迟: ~{delay_ms:.0f} ms</div>
+            <div>📉 丢包率: {loss_rate:.1f}%</div>
+        </div>
+    </div>
+    """
+
 # ==================== Streamlit 界面 ====================
 st.set_page_config(page_title="无人机监控与智能航线规划", layout="wide", page_icon="🚁")
 
@@ -720,7 +764,7 @@ if st.session_state.page == "心跳监控":
             st.pyplot(fig2)
             plt.close(fig2)
 
-# ==================== 页面2：任务执行 ====================
+# ==================== 页面2：任务执行（含通信链路拓扑） ====================
 elif st.session_state.page == "任务执行":
     st.header("✈️ 飞行实时画面 - 任务执行监控")
     
@@ -737,6 +781,7 @@ elif st.session_state.page == "任务执行":
     if st.session_state.flight_sim is None or st.session_state.flight_sim.waypoints != st.session_state.planned_waypoints:
         st.session_state.flight_sim = FlightSimulator(st.session_state.planned_waypoints, speed_mps=st.session_state.flight_speed)
     
+    # 控制按钮行
     col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
     with col_btn1:
         if st.button("▶ 开始任务", use_container_width=True, type="primary"):
@@ -759,6 +804,7 @@ elif st.session_state.page == "任务执行":
     status_text = "▶ 飞行中" if st.session_state.flight_sim.is_running else ("⏸ 已暂停" if st.session_state.flight_sim.is_paused else "⏹ 已停止")
     st.markdown(f"<div style='text-align:center; font-size:20px; margin:10px 0;'>{status_text}</div>", unsafe_allow_html=True)
     
+    # 指标卡片
     col1, col2, col3, col4, col5 = st.columns(5)
     total_wp = len(st.session_state.planned_waypoints)
     current_wp = min(st.session_state.flight_sim.current_index + 1, total_wp)
@@ -778,53 +824,66 @@ elif st.session_state.page == "任务执行":
     st.metric("🔋 电量模拟", f"{st.session_state.flight_sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     
-    st.subheader("实时飞行地图")
-    center_lat, center_lon = st.session_state.flight_sim.current_pos[1], st.session_state.flight_sim.current_pos[0]
-    if st.session_state.map_style == "卫星影像":
-        tiles_url = f"https://webst01.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
-        attr = "高德卫星图"
-    else:
-        tiles_url = f"https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
-        attr = "高德矢量街道图"
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles=tiles_url, attr=attr)
+    # 左侧地图，右侧通信拓扑
+    map_col, topo_col = st.columns([2, 1])
+    with map_col:
+        st.subheader("实时飞行地图")
+        center_lat, center_lon = st.session_state.flight_sim.current_pos[1], st.session_state.flight_sim.current_pos[0]
+        if st.session_state.map_style == "卫星影像":
+            tiles_url = f"https://webst01.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
+            attr = "高德卫星图"
+        else:
+            tiles_url = f"https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
+            attr = "高德矢量街道图"
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles=tiles_url, attr=attr)
+        
+        line_points = [[p[1], p[0]] for p in st.session_state.planned_waypoints]
+        folium.PolyLine(line_points, color="blue", weight=3, opacity=0.6, tooltip="规划航线").add_to(m)
+        
+        if st.session_state.flight_sim.dist_traveled > 0:
+            flown = []
+            dist_acc = 0
+            for i in range(len(st.session_state.planned_waypoints)-1):
+                seg_dist = haversine(st.session_state.planned_waypoints[i][0], st.session_state.planned_waypoints[i][1],
+                                     st.session_state.planned_waypoints[i+1][0], st.session_state.planned_waypoints[i+1][1]) * 1000
+                if dist_acc + seg_dist < st.session_state.flight_sim.dist_traveled - 1e-6:
+                    flown.append(st.session_state.planned_waypoints[i+1])
+                    dist_acc += seg_dist
+                else:
+                    t = (st.session_state.flight_sim.dist_traveled - dist_acc) / seg_dist
+                    lon = st.session_state.planned_waypoints[i][0] + t * (st.session_state.planned_waypoints[i+1][0] - st.session_state.planned_waypoints[i][0])
+                    lat = st.session_state.planned_waypoints[i][1] + t * (st.session_state.planned_waypoints[i+1][1] - st.session_state.planned_waypoints[i][1])
+                    flown.append((lon, lat))
+                    break
+            if flown:
+                flown_path = [[p[1], p[0]] for p in flown]
+                folium.PolyLine(flown_path, color="green", weight=5, opacity=0.9, tooltip="已飞路径").add_to(m)
+        
+        # 无人机图标（红色飞机）
+        folium.Marker(location=[st.session_state.flight_sim.current_pos[1], st.session_state.flight_sim.current_pos[0]],
+                      icon=folium.Icon(color='red', icon='plane', prefix='fa'), popup="当前位置").add_to(m)
+        if st.session_state.planned_waypoints:
+            start = st.session_state.planned_waypoints[0]
+            end = st.session_state.planned_waypoints[-1]
+            folium.Marker(location=[start[1], start[0]], icon=folium.Icon(color='green', icon='play', prefix='fa'), popup="起点").add_to(m)
+            folium.Marker(location=[end[1], end[0]], icon=folium.Icon(color='red', icon='stop', prefix='fa'), popup="终点").add_to(m)
+        
+        if st.checkbox("显示障碍物", value=True, key="flight_show_obs"):
+            for obs in st.session_state.obstacles:
+                coords = [[lat, lng] for lng, lat in obs['coordinates']]
+                height = obs.get('height', 50)
+                color = 'darkred' if height >= st.session_state.flight_altitude else 'red'
+                folium.Polygon(locations=coords, color=color, weight=2, fill=True, fill_opacity=0.2, popup=f"{obs['name']} ({height}m)").add_to(m)
+        st_folium(m, width=700, height=500, key="flight_map")
     
-    line_points = [[p[1], p[0]] for p in st.session_state.planned_waypoints]
-    folium.PolyLine(line_points, color="blue", weight=3, opacity=0.6, tooltip="规划航线").add_to(m)
-    
-    if st.session_state.flight_sim.dist_traveled > 0:
-        flown = []
-        dist_acc = 0
-        for i in range(len(st.session_state.planned_waypoints)-1):
-            seg_dist = haversine(st.session_state.planned_waypoints[i][0], st.session_state.planned_waypoints[i][1],
-                                 st.session_state.planned_waypoints[i+1][0], st.session_state.planned_waypoints[i+1][1]) * 1000
-            if dist_acc + seg_dist < st.session_state.flight_sim.dist_traveled - 1e-6:
-                flown.append(st.session_state.planned_waypoints[i+1])
-                dist_acc += seg_dist
-            else:
-                t = (st.session_state.flight_sim.dist_traveled - dist_acc) / seg_dist
-                lon = st.session_state.planned_waypoints[i][0] + t * (st.session_state.planned_waypoints[i+1][0] - st.session_state.planned_waypoints[i][0])
-                lat = st.session_state.planned_waypoints[i][1] + t * (st.session_state.planned_waypoints[i+1][1] - st.session_state.planned_waypoints[i][1])
-                flown.append((lon, lat))
-                break
-        if flown:
-            flown_path = [[p[1], p[0]] for p in flown]
-            folium.PolyLine(flown_path, color="green", weight=5, opacity=0.9, tooltip="已飞路径").add_to(m)
-    
-    folium.Marker(location=[st.session_state.flight_sim.current_pos[1], st.session_state.flight_sim.current_pos[0]],
-                  icon=folium.Icon(color='red', icon='plane', prefix='fa'), popup="当前位置").add_to(m)
-    if st.session_state.planned_waypoints:
-        start = st.session_state.planned_waypoints[0]
-        end = st.session_state.planned_waypoints[-1]
-        folium.Marker(location=[start[1], start[0]], icon=folium.Icon(color='green', icon='play', prefix='fa'), popup="起点").add_to(m)
-        folium.Marker(location=[end[1], end[0]], icon=folium.Icon(color='red', icon='stop', prefix='fa'), popup="终点").add_to(m)
-    
-    if st.checkbox("显示障碍物", value=True):
-        for obs in st.session_state.obstacles:
-            coords = [[lat, lng] for lng, lat in obs['coordinates']]
-            height = obs.get('height', 50)
-            color = 'darkred' if height >= st.session_state.flight_altitude else 'red'
-            folium.Polygon(locations=coords, color=color, weight=2, fill=True, fill_opacity=0.2, popup=f"{obs['name']} ({height}m)").add_to(m)
-    st_folium(m, width=700, height=500, key="flight_map")
+    with topo_col:
+        st.subheader("📡 通信链路拓扑与数据流")
+        sim_heartbeat = st.session_state.simulator
+        stats_heart = sim_heartbeat.get_statistics()
+        delay = stats_heart['avg_delay']
+        loss = stats_heart['packet_loss_rate']
+        st.markdown(link_topology_html(delay, loss), unsafe_allow_html=True)
+        st.caption("数据来自实时心跳模拟")
     
     if st.session_state.flight_sim.is_running:
         time.sleep(0.5)
@@ -1065,7 +1124,7 @@ elif st.session_state.page == "航线规划":
                 else:
                     final_segments = [(start_pt, end_pt)]
                 
-                # 用于显示的悬停点（与存储逻辑分离）
+                # 用于显示的悬停点
                 display_hover = None
                 if st.session_state.landing_safety:
                     safe, _, _ = check_landing_safety(end_pt, st.session_state.obstacles, st.session_state.flight_altitude, 0.01)
@@ -1081,7 +1140,6 @@ elif st.session_state.page == "航线规划":
                             uy = dy / length
                             display_hover, _ = get_safe_hover_point(seg_end, (ux, uy), st.session_state.obstacles, st.session_state.flight_altitude, 10.0)
                             if display_hover:
-                                # 仅用于显示，不改变存储的 waypoints 以免重复
                                 final_segments = final_segments[:-1] + [(seg_start, display_hover)]
                 
                 colors = ['#00FF00', '#00BFFF', '#1E90FF', '#32CD32']
