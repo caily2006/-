@@ -302,65 +302,99 @@ def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km
         return False, min_dist, nearest_obs
     return True, min_dist, None
 
-# ==================== 飞行监控模拟器（任务执行） ====================
+# ==================== 飞行监控模拟器（修复版，基于绝对时间） ====================
 class FlightSimulator:
     def __init__(self, waypoints, speed_mps=8.5):
         self.waypoints = waypoints
         self.speed = speed_mps
+        self.total_distance = sum(haversine(waypoints[i][0], waypoints[i][1], waypoints[i+1][0], waypoints[i+1][1]) 
+                                   for i in range(len(waypoints)-1)) * 1000
+        self.dist_traveled = 0.0
         self.current_index = 0
         self.current_pos = waypoints[0] if waypoints else None
-        self.total_distance = sum(haversine(waypoints[i][0], waypoints[i][1], waypoints[i+1][0], waypoints[i+1][1]) for i in range(len(waypoints)-1)) * 1000
-        self.dist_traveled = 0.0
-        self.start_time = None
+        
+        # 时间控制变量（绝对时间模型）
+        self.start_abs_time = None      # 开始飞行的绝对时间戳
+        self.pause_start_time = None    # 暂停开始的时间戳
+        self.total_paused_duration = 0.0
         self.is_running = False
         self.is_paused = False
-        self.elapsed_time = 0.0
         self.battery_percent = 100.0
 
+    @property
+    def elapsed_seconds(self):
+        """返回从开始到当前（扣除暂停）的总秒数"""
+        if not self.is_running and not self.is_paused:
+            return 0.0
+        if self.is_running:
+            if self.start_abs_time is None:
+                return 0.0
+            return time.time() - self.start_abs_time
+        else:  # paused
+            return self.total_paused_duration
+
+    def get_elapsed_time(self):
+        """兼容旧接口"""
+        return self.elapsed_seconds
+
     def start(self):
-        self.start_time = time.time()
-        self.is_running = True
-        self.is_paused = False
+        if not self.is_running and not self.is_paused:
+            self.start_abs_time = time.time()
+            self.total_paused_duration = 0.0
+            self.is_running = True
+            self.is_paused = False
+            self.dist_traveled = 0.0
+            self.current_index = 0
+            self.current_pos = self.waypoints[0]
 
     def pause(self):
         if self.is_running and not self.is_paused:
-            self.elapsed_time += time.time() - self.start_time
+            self.pause_start_time = time.time()
             self.is_paused = True
             self.is_running = False
 
     def resume(self):
         if not self.is_running and self.is_paused:
-            self.start_time = time.time()
-            self.is_running = True
+            self.total_paused_duration += time.time() - self.pause_start_time
+            self.start_abs_time = time.time() - self.total_paused_duration
             self.is_paused = False
+            self.is_running = True
 
     def stop(self):
         self.is_running = False
         self.is_paused = False
+        self.start_abs_time = None
+        self.pause_start_time = None
+        self.total_paused_duration = 0.0
+        self.dist_traveled = 0.0
         self.current_index = 0
         self.current_pos = self.waypoints[0] if self.waypoints else None
-        self.dist_traveled = 0.0
-        self.elapsed_time = 0.0
         self.battery_percent = 100.0
 
     def update(self):
+        """根据已用时间更新位置、已飞距离、电量"""
         if not self.is_running or self.is_paused:
             return
-        now = time.time()
-        dt = now - self.start_time + self.elapsed_time
-        self.elapsed_time = dt
-        target_dist = self.speed * dt
+        if self.start_abs_time is None:
+            return
+        
+        elapsed = time.time() - self.start_abs_time
+        target_dist = self.speed * elapsed
+        
         if target_dist >= self.total_distance:
+            # 到达终点
             self.current_index = len(self.waypoints) - 1
             self.current_pos = self.waypoints[-1]
             self.dist_traveled = self.total_distance
             self.is_running = False
+            self.start_abs_time = None
         else:
             dist_accum = 0.0
             for i in range(len(self.waypoints)-1):
-                seg_dist = haversine(self.waypoints[i][0], self.waypoints[i][1], self.waypoints[i+1][0], self.waypoints[i+1][1]) * 1000
+                seg_dist = haversine(self.waypoints[i][0], self.waypoints[i][1], 
+                                     self.waypoints[i+1][0], self.waypoints[i+1][1]) * 1000
                 if target_dist <= dist_accum + seg_dist:
-                    t = (target_dist - dist_accum) / seg_dist
+                    t = (target_dist - dist_accum) / seg_dist if seg_dist > 0 else 0
                     lon = self.waypoints[i][0] + t * (self.waypoints[i+1][0] - self.waypoints[i][0])
                     lat = self.waypoints[i][1] + t * (self.waypoints[i+1][1] - self.waypoints[i][1])
                     self.current_pos = (lon, lat)
@@ -368,6 +402,8 @@ class FlightSimulator:
                     self.dist_traveled = target_dist
                     break
                 dist_accum += seg_dist
+        
+        # 更新电量（线性下降）
         progress = self.dist_traveled / self.total_distance if self.total_distance > 0 else 1
         self.battery_percent = max(0, 100 * (1 - progress * 0.95))
 
@@ -778,57 +814,66 @@ elif st.session_state.page == "任务执行":
             st.warning("⚠️ 请先在「航线规划」页面设置A点和B点并生成航线。")
             st.stop()
     
-    if st.session_state.flight_sim is None or st.session_state.flight_sim.waypoints != st.session_state.planned_waypoints:
-        st.session_state.flight_sim = FlightSimulator(st.session_state.planned_waypoints, speed_mps=st.session_state.flight_speed)
+    if (st.session_state.flight_sim is None or 
+        st.session_state.flight_sim.waypoints != st.session_state.planned_waypoints):
+        st.session_state.flight_sim = FlightSimulator(st.session_state.planned_waypoints, 
+                                                      speed_mps=st.session_state.flight_speed)
     
-    # 控制按钮行
+    sim = st.session_state.flight_sim
+    
+    # 控制按钮
     col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
     with col_btn1:
         if st.button("▶ 开始任务", use_container_width=True, type="primary"):
-            if not st.session_state.flight_sim.is_running and not st.session_state.flight_sim.is_paused:
-                st.session_state.flight_sim.start()
-            elif st.session_state.flight_sim.is_paused:
-                st.session_state.flight_sim.resume()
+            if not sim.is_running and not sim.is_paused:
+                sim.start()
+            elif sim.is_paused:
+                sim.resume()
     with col_btn2:
         if st.button("⏸ 暂停", use_container_width=True):
-            if st.session_state.flight_sim.is_running:
-                st.session_state.flight_sim.pause()
+            if sim.is_running:
+                sim.pause()
     with col_btn3:
         if st.button("⏹️ 停止", use_container_width=True):
-            st.session_state.flight_sim.stop()
+            sim.stop()
     with col_btn4:
         if st.button("🔄 重置", use_container_width=True):
-            st.session_state.flight_sim.stop()
-            st.session_state.flight_sim = FlightSimulator(st.session_state.planned_waypoints, speed_mps=st.session_state.flight_speed)
+            sim.stop()
+            st.session_state.flight_sim = FlightSimulator(st.session_state.planned_waypoints,
+                                                          speed_mps=st.session_state.flight_speed)
+            sim = st.session_state.flight_sim
     
-    status_text = "▶ 飞行中" if st.session_state.flight_sim.is_running else ("⏸ 已暂停" if st.session_state.flight_sim.is_paused else "⏹ 已停止")
-    st.markdown(f"<div style='text-align:center; font-size:20px; margin:10px 0;'>{status_text}</div>", unsafe_allow_html=True)
+    # 更新飞行状态（关键！）
+    sim.update()
+    
+    status_text = "▶ 飞行中" if sim.is_running else ("⏸ 已暂停" if sim.is_paused else "⏹ 已停止")
+    st.markdown(f"<div style='text-align:center; font-size:20px; margin:10px 0;'>{status_text}</div>", 
+                unsafe_allow_html=True)
     
     # 指标卡片
-    col1, col2, col3, col4, col5 = st.columns(5)
     total_wp = len(st.session_state.planned_waypoints)
-    current_wp = min(st.session_state.flight_sim.current_index + 1, total_wp)
-    elapsed_sec = st.session_state.flight_sim.elapsed_time
-    elapsed_str = f"{int(elapsed_sec//60):02d}:{int(elapsed_sec%60):02d}"
-    remaining_dist = max(0, st.session_state.flight_sim.total_distance - st.session_state.flight_sim.dist_traveled)
-    remaining_time = remaining_dist / st.session_state.flight_speed if st.session_state.flight_speed > 0 else 0
+    current_wp = min(sim.current_index + 1, total_wp)
+    elapsed_str = f"{int(sim.elapsed_seconds//60):02d}:{int(sim.elapsed_seconds%60):02d}"
+    remaining_dist = max(0, sim.total_distance - sim.dist_traveled)
+    remaining_time = remaining_dist / sim.speed if sim.speed > 0 else 0
     eta_str = f"{int(remaining_time//60):02d}:{int(remaining_time%60):02d}" if remaining_time < 3600 else ">1h"
-    progress = st.session_state.flight_sim.dist_traveled / st.session_state.flight_sim.total_distance if st.session_state.flight_sim.total_distance > 0 else 0
+    progress = sim.dist_traveled / sim.total_distance if sim.total_distance > 0 else 0
     
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("当前航点", f"{current_wp}/{total_wp}")
-    col2.metric("飞行速度", f"{st.session_state.flight_speed:.1f} m/s")
+    col2.metric("飞行速度", f"{sim.speed:.1f} m/s")
     col3.metric("已用时间", elapsed_str)
     col4.metric("剩余距离", f"{remaining_dist/1000:.2f} km")
     col5.metric("预计到达", eta_str)
     
-    st.metric("🔋 电量模拟", f"{st.session_state.flight_sim.battery_percent:.0f}%")
+    st.metric("🔋 电量模拟", f"{sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     
-    # 左侧地图，右侧通信拓扑
+    # 地图与通信拓扑
     map_col, topo_col = st.columns([2, 1])
     with map_col:
         st.subheader("实时飞行地图")
-        center_lat, center_lon = st.session_state.flight_sim.current_pos[1], st.session_state.flight_sim.current_pos[0]
+        center_lat, center_lon = sim.current_pos[1], sim.current_pos[0]
         if st.session_state.map_style == "卫星影像":
             tiles_url = f"https://webst01.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
             attr = "高德卫星图"
@@ -840,28 +885,28 @@ elif st.session_state.page == "任务执行":
         line_points = [[p[1], p[0]] for p in st.session_state.planned_waypoints]
         folium.PolyLine(line_points, color="blue", weight=3, opacity=0.6, tooltip="规划航线").add_to(m)
         
-        if st.session_state.flight_sim.dist_traveled > 0:
+        if sim.dist_traveled > 0:
             flown = []
             dist_acc = 0
-            for i in range(len(st.session_state.planned_waypoints)-1):
-                seg_dist = haversine(st.session_state.planned_waypoints[i][0], st.session_state.planned_waypoints[i][1],
-                                     st.session_state.planned_waypoints[i+1][0], st.session_state.planned_waypoints[i+1][1]) * 1000
-                if dist_acc + seg_dist < st.session_state.flight_sim.dist_traveled - 1e-6:
-                    flown.append(st.session_state.planned_waypoints[i+1])
+            waypts = st.session_state.planned_waypoints
+            for i in range(len(waypts)-1):
+                seg_dist = haversine(waypts[i][0], waypts[i][1], waypts[i+1][0], waypts[i+1][1]) * 1000
+                if dist_acc + seg_dist < sim.dist_traveled - 1e-6:
+                    flown.append(waypts[i+1])
                     dist_acc += seg_dist
                 else:
-                    t = (st.session_state.flight_sim.dist_traveled - dist_acc) / seg_dist
-                    lon = st.session_state.planned_waypoints[i][0] + t * (st.session_state.planned_waypoints[i+1][0] - st.session_state.planned_waypoints[i][0])
-                    lat = st.session_state.planned_waypoints[i][1] + t * (st.session_state.planned_waypoints[i+1][1] - st.session_state.planned_waypoints[i][1])
+                    t = (sim.dist_traveled - dist_acc) / seg_dist if seg_dist > 0 else 0
+                    lon = waypts[i][0] + t * (waypts[i+1][0] - waypts[i][0])
+                    lat = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
                     flown.append((lon, lat))
                     break
             if flown:
                 flown_path = [[p[1], p[0]] for p in flown]
                 folium.PolyLine(flown_path, color="green", weight=5, opacity=0.9, tooltip="已飞路径").add_to(m)
         
-        # 无人机图标（红色飞机）
-        folium.Marker(location=[st.session_state.flight_sim.current_pos[1], st.session_state.flight_sim.current_pos[0]],
-                      icon=folium.Icon(color='red', icon='plane', prefix='fa'), popup="当前位置").add_to(m)
+        folium.Marker(location=[sim.current_pos[1], sim.current_pos[0]],
+                      icon=folium.Icon(color='red', icon='plane', prefix='fa'), 
+                      popup="当前位置").add_to(m)
         if st.session_state.planned_waypoints:
             start = st.session_state.planned_waypoints[0]
             end = st.session_state.planned_waypoints[-1]
@@ -873,19 +918,20 @@ elif st.session_state.page == "任务执行":
                 coords = [[lat, lng] for lng, lat in obs['coordinates']]
                 height = obs.get('height', 50)
                 color = 'darkred' if height >= st.session_state.flight_altitude else 'red'
-                folium.Polygon(locations=coords, color=color, weight=2, fill=True, fill_opacity=0.2, popup=f"{obs['name']} ({height}m)").add_to(m)
+                folium.Polygon(locations=coords, color=color, weight=2, fill=True, fill_opacity=0.2, 
+                               popup=f"{obs['name']} ({height}m)").add_to(m)
         st_folium(m, width=700, height=500, key="flight_map")
     
     with topo_col:
         st.subheader("📡 通信链路拓扑与数据流")
-        sim_heartbeat = st.session_state.simulator
-        stats_heart = sim_heartbeat.get_statistics()
-        delay = stats_heart['avg_delay']
-        loss = stats_heart['packet_loss_rate']
+        heart_stats = st.session_state.simulator.get_statistics()
+        delay = heart_stats['avg_delay']
+        loss = heart_stats['packet_loss_rate']
         st.markdown(link_topology_html(delay, loss), unsafe_allow_html=True)
         st.caption("数据来自实时心跳模拟")
     
-    if st.session_state.flight_sim.is_running:
+    # 自动刷新
+    if sim.is_running:
         time.sleep(0.5)
         st.rerun()
 
