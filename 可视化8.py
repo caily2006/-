@@ -94,6 +94,7 @@ def point_in_polygon(point, polygon):
     return inside
 
 def point_to_segment_distance(point, seg_start, seg_end):
+    """计算点到线段的距离（公里）"""
     x0, y0 = point
     x1, y1 = seg_start
     x2, y2 = seg_end
@@ -101,117 +102,221 @@ def point_to_segment_distance(point, seg_start, seg_end):
     dy = y2 - y1
     if dx == 0 and dy == 0:
         return haversine(x0, y0, x1, y1)
-    t = ((x0 - x1) * dx + (y0 - y1) * dy) / (dx * dx + dy * dy)
+    t = ((x0 - x1) * dx + (y0 - y1) * dy) / (dx*dx + dy*dy)
     t = max(0, min(1, t))
     proj_x = x1 + t * dx
     proj_y = y1 + t * dy
     return haversine(x0, y0, proj_x, proj_y)
 
 def point_to_polygon_min_distance(point, polygon):
+    """计算点到多边形的最短距离（公里）"""
     min_dist = float('inf')
+    # 检查是否在多边形内部，如内部则距离为0
+    if point_in_polygon(point, polygon):
+        return 0.0
+    # 计算到每条边的最短距离
     for i in range(len(polygon)):
         p1 = polygon[i]
-        p2 = polygon[(i + 1) % len(polygon)]
+        p2 = polygon[(i+1) % len(polygon)]
         dist = point_to_segment_distance(point, p1, p2)
         if dist < min_dist:
             min_dist = dist
     return min_dist
 
-def line_polygon_intersect(line_start, line_end, polygon, safe_dist_m=0):
-    # 快速边相交检测
+def line_polygon_min_distance(line_start, line_end, polygon, safe_dist_m):
+    """计算线段与多边形的最短距离（米），如果小于safe_dist_m则返回True（碰撞）"""
+    # 快速检测线段与多边形边相交
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i+1) % len(polygon)]
         if segments_intersect(line_start, line_end, p1, p2):
             return True
-    if safe_dist_m > 0:
-        # 采样检测安全距离
-        line_len_km = haversine(line_start[0], line_start[1], line_end[0], line_end[1])
-        num_samples = min(15, max(5, int(line_len_km * 1000 / 20)))
-        for i in range(num_samples + 1):
-            t = i / num_samples
-            x = line_start[0] + t * (line_end[0] - line_start[0])
-            y = line_start[1] + t * (line_end[1] - line_start[1])
-            dist_km = point_to_polygon_min_distance((x, y), polygon)
-            if dist_km * 1000 < safe_dist_m:
-                return True
-        for p in polygon:
-            dist_km = point_to_segment_distance(p, line_start, line_end)
-            if dist_km * 1000 < safe_dist_m:
-                return True
-    else:
-        if point_in_polygon(line_start, polygon) or point_in_polygon(line_end, polygon):
+    # 线段上的采样点检测
+    line_len_km = haversine(line_start[0], line_start[1], line_end[0], line_end[1])
+    num_samples = min(20, max(5, int(line_len_km * 1000 / 15)))   # 最多20个采样点
+    for i in range(num_samples+1):
+        t = i / num_samples
+        x = line_start[0] + t * (line_end[0] - line_start[0])
+        y = line_start[1] + t * (line_end[1] - line_start[1])
+        dist_km = point_to_polygon_min_distance((x, y), polygon)
+        if dist_km * 1000 < safe_dist_m:
+            return True
+    # 多边形顶点到线段的距离
+    for p in polygon:
+        dist_km = point_to_segment_distance(p, line_start, line_end)
+        if dist_km * 1000 < safe_dist_m:
             return True
     return False
 
 def get_polygon_center(polygon):
     lng_sum = sum(p[0] for p in polygon)
     lat_sum = sum(p[1] for p in polygon)
-    return lng_sum / len(polygon), lat_sum / len(polygon)
+    return lng_sum/len(polygon), lat_sum/len(polygon)
 
-def get_polygon_bounds(polygon):
-    min_x = min(p[0] for p in polygon)
-    max_x = max(p[0] for p in polygon)
-    min_y = min(p[1] for p in polygon)
-    max_y = max(p[1] for p in polygon)
-    return min_x, min_y, max_x, max_y
-
-def offset_point_away_from_polygon(pt, polygon, dist_km):
+# ==================== 多边形膨胀（无 shapely） ====================
+def expand_polygon(polygon, distance_m):
+    """将多边形向外扩展 distance_m 米，返回新多边形顶点列表（近似）"""
+    if len(polygon) < 3:
+        return polygon
+    # 计算中心点
     cx, cy = get_polygon_center(polygon)
-    dx = pt[0] - cx
-    dy = pt[1] - cy
-    length = sqrt(dx*dx + dy*dy)
-    if length < 1e-9:
-        return (pt[0] + dist_km / 111.0, pt[1])
-    delta_deg = dist_km / 111.0
-    new_x = pt[0] + (dx / length) * delta_deg
-    new_y = pt[1] + (dy / length) * delta_deg
-    return (new_x, new_y)
+    # 将每个顶点沿从中心向外的方向移动 distance_m 米
+    new_poly = []
+    delta_deg = distance_m / 111000.0
+    for p in polygon:
+        dx = p[0] - cx
+        dy = p[1] - cy
+        length = sqrt(dx*dx + dy*dy)
+        if length < 1e-9:
+            new_poly.append((p[0] + delta_deg, p[1]))
+        else:
+            ux = dx / length
+            uy = dy / length
+            new_poly.append((p[0] + ux * delta_deg, p[1] + uy * delta_deg))
+    return new_poly
 
-# ==================== 简化的避障算法（单点绕行） ====================
-def find_simple_avoidance_path(start, end, obstacles, flight_altitude, safe_dist_km):
-    safe_dist_m = safe_dist_km * 1000
-    # 收集与直线相交的障碍物
-    intersecting = []
-    for obs in obstacles:
-        if obs.get('height', 50) >= flight_altitude:
-            poly = obs['coordinates']
-            if line_polygon_intersect(start, end, poly, safe_dist_m):
-                intersecting.append(obs)
-    if not intersecting:
+# ==================== 避障算法（基于膨胀后顶点图 + Dijkstra） ====================
+def build_graph(nodes, start, end, obstacles, safe_dist_m):
+    """建立可见性图：如果两点间线段不与任何膨胀后的障碍物相交，则添加边"""
+    # 节点列表包含起点、终点、所有膨胀后障碍物的顶点
+    n = len(nodes)
+    adj = [[] for _ in range(n)]
+    for i in range(n):
+        for j in range(i+1, n):
+            # 检查线段 nodes[i] -> nodes[j] 是否安全
+            safe = True
+            for obs in obstacles:
+                if line_polygon_min_distance(nodes[i], nodes[j], obs['coordinates'], safe_dist_m):
+                    safe = False
+                    break
+            if safe:
+                dist = haversine(nodes[i][0], nodes[i][1], nodes[j][0], nodes[j][1])
+                adj[i].append((j, dist))
+                adj[j].append((i, dist))
+    return adj
+
+def dijkstra(adj, start_idx, end_idx):
+    """返回最短路径节点索引列表"""
+    import heapq
+    n = len(adj)
+    dist = [float('inf')] * n
+    prev = [-1] * n
+    dist[start_idx] = 0
+    pq = [(0, start_idx)]
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist[u]:
+            continue
+        if u == end_idx:
+            break
+        for v, w in adj[u]:
+            if dist[u] + w < dist[v]:
+                dist[v] = dist[u] + w
+                prev[v] = u
+                heapq.heappush(pq, (dist[v], v))
+    if dist[end_idx] == float('inf'):
+        return []
+    path = []
+    cur = end_idx
+    while cur != -1:
+        path.append(cur)
+        cur = prev[cur]
+    path.reverse()
+    return path
+
+def find_avoidance_path(start, end, obstacles, flight_altitude, safe_dist_m):
+    # 过滤需要避让的障碍物（高度 >= 飞行高度）
+    blocking_obs = [obs for obs in obstacles if obs.get('height', 50) >= flight_altitude]
+    if not blocking_obs:
         return [(start, end)]
-    # 取第一个相交的障碍物
-    obs = intersecting[0]
-    poly = obs['coordinates']
-    # 计算障碍物的边界框中心，并找一个合理的绕行点（沿垂直方向偏移）
-    min_x, min_y, max_x, max_y = get_polygon_bounds(poly)
-    cx = (min_x + max_x) / 2
-    cy = (min_y + max_y) / 2
-    # 计算垂直方向
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length = sqrt(dx*dx + dy*dy)
-    if length < 1e-9:
+    
+    # 为每个障碍物生成膨胀多边形（安全缓冲区）
+    expanded_polys = []
+    for obs in blocking_obs:
+        poly = obs['coordinates']
+        expanded = expand_polygon(poly, safe_dist_m)
+        expanded_polys.append(expanded)
+    
+    # 收集所有节点：起点、终点、所有膨胀后的顶点
+    nodes = [start, end]
+    for poly in expanded_polys:
+        for pt in poly:
+            nodes.append(pt)
+    # 去重（基于距离容差）
+    unique_nodes = []
+    for p in nodes:
+        if not any(haversine(p[0], p[1], q[0], q[1]) < 1e-6 for q in unique_nodes):
+            unique_nodes.append(p)
+    nodes = unique_nodes
+    start_idx = nodes.index(start)
+    end_idx = nodes.index(end)
+    
+    # 构建可见性图（利用原始障碍物做碰撞检测，注意使用原始障碍物边界 + 安全距离）
+    adj = build_graph(nodes, start, end, blocking_obs, safe_dist_m)
+    
+    # Dijkstra
+    path_indices = dijkstra(adj, start_idx, end_idx)
+    if not path_indices:
+        # 找不到路径，降级为直线
         return [(start, end)]
-    ux = dx / length
-    uy = dy / length
-    perp_x = -uy
-    perp_y = ux
-    # 偏移距离（确保安全距离）
-    offset_deg = safe_dist_km / 111.0
-    # 尝试两个方向，选择离终点较近的
-    waypoint1 = (cx + perp_x * offset_deg, cy + perp_y * offset_deg)
-    waypoint2 = (cx - perp_x * offset_deg, cy - perp_y * offset_deg)
-    # 确保绕行点不在障碍物内
-    if point_in_polygon(waypoint1, poly):
-        waypoint1 = (cx + perp_x * offset_deg * 2, cy + perp_y * offset_deg * 2)
-    if point_in_polygon(waypoint2, poly):
-        waypoint2 = (cx - perp_x * offset_deg * 2, cy - perp_y * offset_deg * 2)
-    dist1 = haversine(waypoint1[0], waypoint1[1], end[0], end[1])
-    dist2 = haversine(waypoint2[0], waypoint2[1], end[0], end[1])
-    waypoint = waypoint1 if dist1 < dist2 else waypoint2
-    # 返回分段路径
-    return [(start, waypoint), (waypoint, end)]
+    
+    # 构建航段
+    waypoints = [nodes[i] for i in path_indices]
+    segments = [(waypoints[i], waypoints[i+1]) for i in range(len(waypoints)-1)]
+    return segments
+
+# ==================== 后处理：确保每段距离安全（若不足则内插偏移点） ====================
+def refine_segments_with_safety(segments, obstacles, safe_dist_m, max_depth=3):
+    """对每个线段检查是否与障碍物保持安全距离，若不满足则在中间插入绕行点"""
+    if max_depth <= 0:
+        return segments
+    new_segments = []
+    for seg in segments:
+        p1, p2 = seg
+        # 快速检查该线段是否安全
+        safe = True
+        for obs in obstacles:
+            if line_polygon_min_distance(p1, p2, obs['coordinates'], safe_dist_m):
+                safe = False
+                break
+        if safe:
+            new_segments.append(seg)
+        else:
+            # 在中间点生成一个绕行点：取线段中点，然后向远离最近障碍物的方向偏移
+            # 找到最近的障碍物
+            min_dist = float('inf')
+            closest_obs = None
+            for obs in obstacles:
+                # 计算线段到障碍物的距离（粗略）
+                # 采样中点距离
+                mid = ((p1[0]+p2[0])/2, (p1[1]+p2[1])/2)
+                dist = point_to_polygon_min_distance(mid, obs['coordinates']) * 1000
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_obs = obs
+            if closest_obs is not None:
+                # 计算偏移方向：从中点指向障碍物中心的相反方向
+                center = get_polygon_center(closest_obs['coordinates'])
+                mid = ((p1[0]+p2[0])/2, (p1[1]+p2[1])/2)
+                dx = mid[0] - center[0]
+                dy = mid[1] - center[1]
+                length = sqrt(dx*dx + dy*dy)
+                if length > 1e-9:
+                    ux = dx / length
+                    uy = dy / length
+                else:
+                    ux = 1.0
+                    uy = 0.0
+                # 偏移距离为安全距离的1.2倍
+                offset_deg = (safe_dist_m * 1.2) / 111000.0
+                new_pt = (mid[0] + ux * offset_deg, mid[1] + uy * offset_deg)
+                # 递归处理左右子段
+                left_seg = (p1, new_pt)
+                right_seg = (new_pt, p2)
+                new_segments.extend(refine_segments_with_safety([left_seg, right_seg], obstacles, safe_dist_m, max_depth-1))
+            else:
+                new_segments.append(seg)
+    return new_segments
 
 # ==================== 曲线平滑 ====================
 def bezier_curve(points, num_points=50):
@@ -1024,6 +1129,16 @@ elif st.session_state.page == "航线规划":
             )
             st.session_state.safe_distance = safe_distance_m / 1000.0
             st.caption(f"当前安全半径: {safe_distance_m} 米，路径将与障碍物保持 ≥{safe_distance_m} 米距离")
+            
+            route_side = st.radio(
+                "绕行侧选择",
+                ["最优路径", "左侧绕行", "右侧绕行"],
+                index=["最优路径", "左侧绕行", "右侧绕行"].index(st.session_state.route_side)
+            )
+            st.session_state.route_side = route_side
+            
+            curve_smooth = st.checkbox("显示平滑曲线路径", value=st.session_state.curve_smooth)
+            st.session_state.curve_smooth = curve_smooth
         
         st.divider()
         st.subheader("🛬 降落安全设置")
@@ -1049,16 +1164,16 @@ elif st.session_state.page == "航线规划":
             
             original_dist = haversine(start_point[0], start_point[1], end_point[0], end_point[1])
             if avoidance_enabled:
-                segments = find_simple_avoidance_path(
-                    start_point, end_point,
-                    st.session_state.obstacles,
-                    st.session_state.flight_altitude,
-                    st.session_state.safe_distance
-                )
+                # 使用新的全局路径搜索算法
+                safe_dist_m = st.session_state.safe_distance * 1000
+                segments = find_avoidance_path(start_point, end_point, st.session_state.obstacles, st.session_state.flight_altitude, safe_dist_m)
+                # 后处理：确保每段都满足安全距离（递归细化）
+                if len(segments) > 1:
+                    segments = refine_segments_with_safety(segments, st.session_state.obstacles, safe_dist_m, max_depth=2)
             else:
                 segments = [(start_point, end_point)]
             
-            # 构建航点列表
+            # 构建完整航点列表
             waypoints = []
             for seg in segments:
                 if not waypoints:
@@ -1084,7 +1199,7 @@ elif st.session_state.page == "航线规划":
                         hover_lon = p2[0] - ux * offset_km / 111.0
                         hover_lat = p2[1] - uy * offset_km / 111.0
                         waypoints[-1] = (hover_lon, hover_lat)
-                        st.warning(f"⚠️ 终点距离障碍物 {obs_name} 仅 {dist_to_obs*1000:.1f}米，已在10米外设置悬停点。")
+                        st.warning("⚠️ 终点10米内有障碍物，已自动在终点外10米处设置悬停点。")
                 else:
                     st.success("✅ 降落点安全")
             
@@ -1092,7 +1207,7 @@ elif st.session_state.page == "航线规划":
             total_dist = sum(haversine(waypoints[i][0], waypoints[i][1], waypoints[i+1][0], waypoints[i+1][1]) for i in range(len(waypoints)-1))
             extra = total_dist - original_dist
             if avoidance_enabled:
-                st.markdown(f'<div class="info-text">✨ 避障路径 | 总距离 {total_dist:.3f} km (+{extra:.3f} km)</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="info-text">✨ {st.session_state.route_side} | 总距离 {total_dist:.3f} km (+{extra:.3f} km)</div>', unsafe_allow_html=True)
             else:
                 st.markdown(f'<div class="safe-text">✅ 直线航线 | 距离 {original_dist:.3f} km</div>', unsafe_allow_html=True)
         else:
