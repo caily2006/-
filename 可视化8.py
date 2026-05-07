@@ -118,15 +118,13 @@ def point_to_polygon_min_distance(point, polygon):
     return min_dist
 
 def line_polygon_intersect_with_safety(line_start, line_end, polygon, safe_dist_m):
-    # 快速检测：线段与多边形边相交
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i+1) % len(polygon)]
         if segments_intersect(line_start, line_end, p1, p2):
             return True
-    # 线段上的采样点检测（优化采样数量，减小计算量）
     line_len_m = haversine(line_start[0], line_start[1], line_end[0], line_end[1]) * 1000
-    num_samples = min(30, max(10, int(line_len_m / 10)))  # 最多30个点，最少10个点
+    num_samples = min(30, max(10, int(line_len_m / 10)))
     for i in range(num_samples+1):
         t = i / num_samples
         x = line_start[0] + t * (line_end[0] - line_start[0])
@@ -134,7 +132,6 @@ def line_polygon_intersect_with_safety(line_start, line_end, polygon, safe_dist_
         dist_km = point_to_polygon_min_distance((x, y), polygon)
         if dist_km * 1000 < safe_dist_m:
             return True
-    # 多边形顶点到线段距离
     for p in polygon:
         dist_km = point_to_segment_distance(p, line_start, line_end)
         if dist_km * 1000 < safe_dist_m:
@@ -318,7 +315,7 @@ def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km
         return False, min_dist, nearest_obs
     return True, min_dist, None
 
-# ==================== 飞行监控模拟器 ====================
+# ==================== 飞行监控模拟器（修复版） ====================
 class FlightSimulator:
     def __init__(self, waypoints, speed_mps=8.5):
         self.waypoints = waypoints
@@ -381,6 +378,7 @@ class FlightSimulator:
         self.battery_percent = 100.0
 
     def update(self):
+        """根据已用时间更新位置、已飞距离、电量。每次页面刷新时调用"""
         if not self.is_running or self.is_paused:
             return
         if self.start_abs_time is None:
@@ -388,6 +386,7 @@ class FlightSimulator:
         elapsed = time.time() - self.start_abs_time
         target_dist = self.speed * elapsed
         if target_dist >= self.total_distance:
+            # 到达终点
             self.current_index = len(self.waypoints) - 1
             self.current_pos = self.waypoints[-1]
             self.dist_traveled = self.total_distance
@@ -801,7 +800,7 @@ if st.session_state.page == "心跳监控":
             st.pyplot(fig2)
             plt.close(fig2)
 
-# ==================== 页面2：任务执行 ====================
+# ==================== 页面2：任务执行（修复无人机显示问题） ====================
 elif st.session_state.page == "任务执行":
     st.header("✈️ 飞行实时画面 - 任务执行监控")
     
@@ -821,8 +820,9 @@ elif st.session_state.page == "任务执行":
                                                       speed_mps=st.session_state.flight_speed)
     
     sim = st.session_state.flight_sim
-    sim.update()
+    sim.update()  # 更新位置
     
+    # 控制按钮
     col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
     with col_btn1:
         if st.button("▶ 开始任务", use_container_width=True, type="primary"):
@@ -848,6 +848,7 @@ elif st.session_state.page == "任务执行":
     st.markdown(f"<div style='text-align:center; font-size:20px; margin:10px 0;'>{status_text}</div>", 
                 unsafe_allow_html=True)
     
+    # 指标卡片
     total_wp = len(st.session_state.planned_waypoints)
     current_wp = min(sim.current_index + 1, total_wp)
     elapsed_str = f"{int(sim.elapsed_seconds//60):02d}:{int(sim.elapsed_seconds%60):02d}"
@@ -866,17 +867,25 @@ elif st.session_state.page == "任务执行":
     st.metric("🔋 电量模拟", f"{sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     
+    # 地图与通信拓扑
     map_col, topo_col = st.columns([2, 1])
     with map_col:
         st.subheader("实时飞行地图")
-        # 任务执行使用OSM保证稳定
+        # 确保当前位置有效
+        if sim.current_pos is None:
+            st.error("当前位置无效，请检查航线规划")
+            st.stop()
+        center_lat, center_lon = sim.current_pos[1], sim.current_pos[0]
+        # 使用 OpenStreetMap 保证稳定显示
         tiles_url = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         attr = "OpenStreetMap"
-        m = folium.Map(location=[sim.current_pos[1], sim.current_pos[0]], zoom_start=16, tiles=tiles_url, attr=attr)
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles=tiles_url, attr=attr)
         
+        # 规划航线（蓝色）
         line_points = [[p[1], p[0]] for p in st.session_state.planned_waypoints]
         folium.PolyLine(line_points, color="blue", weight=4, opacity=0.8, tooltip="规划航线").add_to(m)
         
+        # 已飞路径（绿色）
         if sim.dist_traveled > 0:
             flown = []
             dist_acc = 0
@@ -896,15 +905,18 @@ elif st.session_state.page == "任务执行":
                 flown_path = [[p[1], p[0]] for p in flown]
                 folium.PolyLine(flown_path, color="green", weight=5, opacity=0.9, tooltip="已飞路径").add_to(m)
         
+        # 无人机图标（红色飞机）
         folium.Marker(location=[sim.current_pos[1], sim.current_pos[0]],
                       icon=folium.Icon(color='red', icon='plane', prefix='fa'), 
                       popup="当前位置").add_to(m)
+        # 起点终点标记
         if st.session_state.planned_waypoints:
             start = st.session_state.planned_waypoints[0]
             end = st.session_state.planned_waypoints[-1]
             folium.Marker(location=[start[1], start[0]], icon=folium.Icon(color='green', icon='play', prefix='fa'), popup="起点").add_to(m)
             folium.Marker(location=[end[1], end[0]], icon=folium.Icon(color='red', icon='stop', prefix='fa'), popup="终点").add_to(m)
         
+        # 障碍物显示
         if st.checkbox("显示障碍物", value=True, key="flight_show_obs"):
             for obs in st.session_state.obstacles:
                 coords = [[lat, lng] for lng, lat in obs['coordinates']]
@@ -912,6 +924,9 @@ elif st.session_state.page == "任务执行":
                 color = 'darkred' if height >= st.session_state.flight_altitude else 'red'
                 folium.Polygon(locations=coords, color=color, weight=2, fill=True, fill_opacity=0.2, 
                                popup=f"{obs['name']} ({height}m)").add_to(m)
+        
+        # 显示调试信息（可选）
+        st.caption(f"📍 当前位置: {sim.current_pos[0]:.6f}, {sim.current_pos[1]:.6f}")
         st_folium(m, width=700, height=500, key="flight_map")
     
     with topo_col:
@@ -922,7 +937,12 @@ elif st.session_state.page == "任务执行":
         st.markdown(link_topology_html(delay, loss), unsafe_allow_html=True)
         st.caption("数据来自实时心跳模拟")
     
+    # 自动刷新页面（飞行中时）
     if sim.is_running:
+        time.sleep(0.5)
+        st.rerun()
+    elif sim.is_paused:
+        # 暂停时仍可刷新以显示暂停状态，但不自动前进
         time.sleep(0.5)
         st.rerun()
 
