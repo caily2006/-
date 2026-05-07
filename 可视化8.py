@@ -118,12 +118,15 @@ def point_to_polygon_min_distance(point, polygon):
     return min_dist
 
 def line_polygon_intersect_with_safety(line_start, line_end, polygon, safe_dist_m):
+    # 快速检测：线段与多边形边相交
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i+1) % len(polygon)]
         if segments_intersect(line_start, line_end, p1, p2):
             return True
-    num_samples = max(20, int(haversine(line_start[0], line_start[1], line_end[0], line_end[1]) * 1000 / 5))
+    # 线段上的采样点检测（优化采样数量，减小计算量）
+    line_len_m = haversine(line_start[0], line_start[1], line_end[0], line_end[1]) * 1000
+    num_samples = min(30, max(10, int(line_len_m / 10)))  # 最多30个点，最少10个点
     for i in range(num_samples+1):
         t = i / num_samples
         x = line_start[0] + t * (line_end[0] - line_start[0])
@@ -131,6 +134,7 @@ def line_polygon_intersect_with_safety(line_start, line_end, polygon, safe_dist_
         dist_km = point_to_polygon_min_distance((x, y), polygon)
         if dist_km * 1000 < safe_dist_m:
             return True
+    # 多边形顶点到线段距离
     for p in polygon:
         dist_km = point_to_segment_distance(p, line_start, line_end)
         if dist_km * 1000 < safe_dist_m:
@@ -865,7 +869,7 @@ elif st.session_state.page == "任务执行":
     map_col, topo_col = st.columns([2, 1])
     with map_col:
         st.subheader("实时飞行地图")
-        # 使用 OpenStreetMap 确保稳定显示（任务执行地图需要稳定，避免白屏）
+        # 任务执行使用OSM保证稳定
         tiles_url = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         attr = "OpenStreetMap"
         m = folium.Map(location=[sim.current_pos[1], sim.current_pos[0]], zoom_start=16, tiles=tiles_url, attr=attr)
@@ -922,7 +926,7 @@ elif st.session_state.page == "任务执行":
         time.sleep(0.5)
         st.rerun()
 
-# ==================== 页面3：航线规划（修改点：use_osm 默认 False） ====================
+# ==================== 页面3：航线规划 ====================
 elif st.session_state.page == "航线规划":
     st.header("🗺️ 航线规划 · 多路径选择 + 安全半径约束")
     
@@ -1034,8 +1038,7 @@ elif st.session_state.page == "航线规划":
         
         st.divider()
         st.subheader("🗺️ 地图底图样式")
-        # 用户要求：不要默认勾选 OpenStreetMap，即默认使用高德
-        use_osm = st.checkbox("使用 OpenStreetMap 底图（备选）", value=False)   # 修改为 False
+        use_osm = st.checkbox("使用 OpenStreetMap 底图（备选）", value=False)
         if not use_osm:
             style_choice = st.radio("选择地图类型", ["卫星影像", "矢量街道"], index=0 if st.session_state.map_style == "卫星影像" else 1)
             st.session_state.map_style = style_choice
@@ -1258,7 +1261,7 @@ elif st.session_state.page == "坐标系设置":
         gcj_lon, gcj_lat = wgs84_to_gcj02(test_lon, test_lat)
         st.write(f"GCJ-02: {gcj_lat:.6f}, {gcj_lon:.6f}")
 
-# ==================== 自动刷新（心跳） ====================
-if st.session_state.running:
+# ==================== 自动刷新（仅心跳监控页面） ====================
+if st.session_state.running and st.session_state.page == "心跳监控":
     time.sleep(refresh_rate)
     st.rerun()
