@@ -15,8 +15,6 @@ import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
 from math import radians, sin, cos, sqrt, asin, pi, atan2, degrees
-from shapely.geometry import Polygon, Point, LineString
-from shapely.ops import unary_union
 
 # ==================== 配置 ====================
 AMAP_KEY = "0c475e7a50516001883c104383b43f31"
@@ -59,236 +57,265 @@ def haversine(lon1, lat1, lon2, lat2):
     c = 2 * asin(sqrt(a))
     return R * c
 
-# ==================== 简化的几何工具（使用 shapely） ====================
-def points_to_polygon(points):
-    """将坐标列表转换为 shapely Polygon（输入为[(lng, lat), ...]）"""
-    return Polygon(points)
+# ==================== 基础几何函数 ====================
+def on_segment(p, q, r):
+    if (q[0] <= max(p[0], r[0]) and q[0] >= min(p[0], r[0]) and
+        q[1] <= max(p[1], r[1]) and q[1] >= min(p[1], r[1])):
+        return True
+    return False
 
-def expand_polygon(poly, distance_m):
-    """将多边形向外缓冲 distance_m 米，返回缓冲后的多边形"""
-    # 距离换算：1度 ≈ 111km，但 shapely buffer 直接使用度会导致误差，这里粗略转换
-    # 改用更精确的方法：先用米转度近似，但 shapely buffer 参数是度
-    deg = distance_m / 111000.0
-    return poly.buffer(deg)
+def orientation(p, q, r):
+    val = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
+    if val == 0: return 0
+    return 1 if val > 0 else 2
 
-def is_line_clear(p1, p2, obstacles, safe_dist_m):
-    """线段是否与任何膨胀后的障碍物相交（安全距离已包含）"""
-    line = LineString([p1, p2])
-    for obs in obstacles:
-        poly = points_to_polygon(obs['coordinates'])
-        expanded = expand_polygon(poly, safe_dist_m)
-        if line.intersects(expanded):
-            return False
-    return True
+def segments_intersect(p1, q1, p2, q2):
+    o1 = orientation(p1, q1, p2)
+    o2 = orientation(p1, q1, q2)
+    o3 = orientation(p2, q2, p1)
+    o4 = orientation(p2, q2, q1)
+    if o1 != o2 and o3 != o4:
+        return True
+    if o1 == 0 and on_segment(p1, p2, q1): return True
+    if o2 == 0 and on_segment(p1, q2, q1): return True
+    if o3 == 0 and on_segment(p2, p1, q2): return True
+    if o4 == 0 and on_segment(p2, q1, q2): return True
+    return False
 
-def find_path_a_star(start, end, obstacles, safe_dist_m):
-    """A* 搜索经过膨胀后障碍物之间的最短路径"""
-    # 收集所有顶点作为候选节点
-    nodes = [start, end]
-    for obs in obstacles:
-        poly = points_to_polygon(obs['coordinates'])
-        expanded = expand_polygon(poly, safe_dist_m)
-        # 取膨胀后的多边形顶点
-        if not expanded.is_empty:
-            coords = list(expanded.exterior.coords)
-            for c in coords:
-                nodes.append((c[0], c[1]))
-    # 去重
-    nodes = list(set(nodes))
-    # 构建邻居关系（距离矩阵）
-    import heapq
-    start_idx = nodes.index(start)
-    end_idx = nodes.index(end)
-    # Dijkstra 算法
-    dist = [float('inf')] * len(nodes)
-    dist[start_idx] = 0
-    prev = [-1] * len(nodes)
-    pq = [(0, start_idx)]
-    while pq:
-        d, u = heapq.heappop(pq)
-        if d > dist[u]:
-            continue
-        if u == end_idx:
-            break
-        for v in range(len(nodes)):
-            if v == u:
-                continue
-            # 检查线段是否无碰撞
-            if is_line_clear(nodes[u], nodes[v], obstacles, safe_dist_m):
-                w = haversine(nodes[u][0], nodes[u][1], nodes[v][0], nodes[v][1])
-                if dist[u] + w < dist[v]:
-                    dist[v] = dist[u] + w
-                    prev[v] = u
-                    heapq.heappush(pq, (dist[v], v))
-    # 重建路径
-    if dist[end_idx] == float('inf'):
-        # 无路径，返回直线
-        return [(start, end)]
-    path = []
-    cur = end_idx
-    while cur != -1:
-        path.append(nodes[cur])
-        cur = prev[cur]
-    path.reverse()
-    # 转换为航段
-    segments = [(path[i], path[i+1]) for i in range(len(path)-1)]
-    return segments
+def point_in_polygon(point, polygon):
+    x, y = point
+    inside = False
+    n = len(polygon)
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i+1) % n]
+        if ((y1 > y) != (y2 > y)) and (x < (x2-x1)*(y-y1)/(y2-y1) + x1):
+            inside = not inside
+    return inside
 
-# ==================== 障碍物管理 ====================
-def load_obstacles():
-    if os.path.exists(OBSTACLE_FILE):
-        try:
-            with open(OBSTACLE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return []
-    return []
+def point_to_segment_distance(point, seg_start, seg_end):
+    x0,y0 = point
+    x1,y1 = seg_start
+    x2,y2 = seg_end
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0 and dy == 0:
+        return haversine(x0,y0,x1,y1)
+    t = ((x0-x1)*dx + (y0-y1)*dy) / (dx*dx + dy*dy)
+    t = max(0, min(1, t))
+    proj_x = x1 + t*dx
+    proj_y = y1 + t*dy
+    return haversine(x0,y0,proj_x,proj_y)
 
-def save_obstacles(obstacles):
-    with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(obstacles, f, ensure_ascii=False, indent=2)
+def point_to_polygon_min_distance(point, polygon):
+    min_dist = float('inf')
+    for i in range(len(polygon)):
+        p1 = polygon[i]
+        p2 = polygon[(i+1) % len(polygon)]
+        dist = point_to_segment_distance(point, p1, p2)
+        if dist < min_dist:
+            min_dist = dist
+    return min_dist
 
-# ==================== 心跳模拟器 ====================
-class DroneHeartbeatSimulator:
-    def __init__(self, timeout_seconds=3):
-        self.timeout_seconds = timeout_seconds
-        self.sequence_number = 0
-        self.heartbeat_history = deque(maxlen=100)
-        self.timeout_events = deque(maxlen=20)
-        self.last_received_time = time.time()
-        self.start_time = time.time()
-        self.total_sent = 0
-        self.total_lost = 0
-        self.last_timeout_time = 0
-
-    def get_beijing_time(self):
-        return datetime.datetime.now(BEIJING_TZ)
-    
-    def generate_heartbeat(self):
-        timestamp = self.get_beijing_time()
-        self.total_sent += 1
-        if random.random() < 0.1:
-            self.total_lost += 1
-            self._check_timeout()
-            return None
-        delay_ms = random.uniform(100, 500)
-        receive_time = self.get_beijing_time()
-        record = {
-            'sequence': self.sequence_number,
-            'send_time': timestamp,
-            'receive_time': receive_time,
-            'delay_ms': delay_ms,
-            'status': 'received'
-        }
-        self.heartbeat_history.append(record)
-        self.last_received_time = time.time()
-        self.sequence_number += 1
-        self._check_timeout()
-        return record
-    
-    def _check_timeout(self):
-        current_time = time.time()
-        if current_time - self.last_received_time > self.timeout_seconds:
-            if current_time - self.last_timeout_time > 1:
-                self.timeout_events.append({
-                    'time': self.get_beijing_time(),
-                    'duration': current_time - self.last_received_time
-                })
-                self.last_timeout_time = current_time
-    
-    def get_recent_data(self, window_size=30):
-        sequences, delays, receive_times = [], [], []
-        if not self.heartbeat_history:
-            return sequences, delays, receive_times
-        for record in self.heartbeat_history:
-            if record and isinstance(record, dict):
-                sequences.append(record.get('sequence', 0))
-                delays.append(record.get('delay_ms', 0))
-                receive_times.append(record.get('receive_time', datetime.datetime.now(BEIJING_TZ)))
-        if len(sequences) > window_size:
-            sequences = sequences[-window_size:]
-            delays = delays[-window_size:]
-            receive_times = receive_times[-window_size:]
-        return sequences, delays, receive_times
-    
-    def get_statistics(self):
-        if not self.heartbeat_history:
-            return {'avg_delay': 0, 'min_delay': 0, 'max_delay': 0, 'packet_loss_rate': 0, 'received_count': 0}
-        delays = [r['delay_ms'] for r in self.heartbeat_history if isinstance(r, dict) and 'delay_ms' in r]
-        if not delays:
-            return {'avg_delay': 0, 'min_delay': 0, 'max_delay': 0, 'packet_loss_rate': 0, 'received_count': len(self.heartbeat_history)}
-        packet_loss_rate = (self.total_lost / self.total_sent * 100) if self.total_sent > 0 else 0
-        return {
-            'avg_delay': sum(delays) / len(delays),
-            'min_delay': min(delays),
-            'max_delay': max(delays),
-            'packet_loss_rate': packet_loss_rate,
-            'received_count': len(self.heartbeat_history)
-        }
-
-# ==================== 辅助函数 ====================
-def get_beijing_time_info():
-    now = datetime.datetime.now(BEIJING_TZ)
-    return {
-        'datetime': now,
-        'time_str': now.strftime('%Y年%m月%d日 %H:%M:%S'),
-        'weekday': now.strftime('%A'),
-        'timezone': 'Asia/Shanghai (UTC+8)'
-    }
-
-def format_beijing_time(dt):
-    if dt is None:
-        return "N/A"
-    if dt.tzinfo is None:
-        dt = BEIJING_TZ.localize(dt)
-    return dt.strftime('%Y-%m-%d %H:%M:%S')
-
-def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, timeout_events):
-    plt.style.use('seaborn-v0_8-darkgrid')
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-    if sequences and delays and receive_times and len(sequences) > 0:
-        try:
-            ax1.plot(receive_times, delays, 'b-o', markersize=6, linewidth=2)
-            ax1.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
-            ax1.set_ylabel('延迟 (ms)', fontsize=12, fontweight='bold')
-            ax1.set_title('实时心跳延迟监控（按北京时间）', fontsize=14, fontweight='bold')
-            ax1.grid(True, alpha=0.3, linestyle='--')
-            ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-            ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
-            plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
-            if delays:
-                avg_delay = sum(delays) / len(delays)
-                ax1.axhline(y=avg_delay, color='r', linestyle='--', linewidth=2, label=f'平均延迟: {avg_delay:.1f}ms')
-                ax1.legend(loc='upper right')
-            ax1.axhline(y=400, color='orange', linestyle=':', linewidth=1.5, label='延迟阈值: 400ms', alpha=0.7)
-            threshold = 400
-            above_threshold = [d if d > threshold else threshold for d in delays]
-            ax1.fill_between(receive_times, threshold, above_threshold, alpha=0.3, color='red', label='超出阈值')
-            ax2.plot(receive_times, sequences, 'g-o', markersize=6, linewidth=2)
-            ax2.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
-            ax2.set_ylabel('心跳序号', fontsize=12, fontweight='bold')
-            ax2.set_title(f'心跳序号接收情况 | 超时次数: {timeout_count}', fontsize=14, fontweight='bold')
-            ax2.grid(True, alpha=0.3, linestyle='--')
-            ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-            ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
-            plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
-            ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-            if timeout_events and len(timeout_events) > 0:
-                now_beijing = datetime.datetime.now(BEIJING_TZ)
-                recent_timeouts = [e for e in timeout_events if e and isinstance(e, dict) and 'time' in e and (now_beijing - e['time']).total_seconds() < 10]
-                if recent_timeouts:
-                    ax2.text(0.02, 0.98, f"⚠️ 最近超时: {len(recent_timeouts)}次", transform=ax2.transAxes, fontsize=11,
-                            verticalalignment='top', fontweight='bold', bbox=dict(boxstyle='round', facecolor='red', alpha=0.3))
-        except Exception as e:
-            ax1.text(0.5, 0.5, f'绘图错误: {str(e)}', ha='center', va='center')
-            ax2.text(0.5, 0.5, '请检查数据', ha='center', va='center')
+def line_polygon_intersect(line_start, line_end, polygon, safe_dist_m=0):
+    # 快速检测边相交
+    for i in range(len(polygon)):
+        p1 = polygon[i]
+        p2 = polygon[(i+1) % len(polygon)]
+        if segments_intersect(line_start, line_end, p1, p2):
+            return True
+    if safe_dist_m > 0:
+        line_len_km = haversine(line_start[0], line_start[1], line_end[0], line_end[1])
+        num_samples = min(15, max(5, int(line_len_km * 1000 / 20)))
+        for i in range(num_samples+1):
+            t = i / num_samples
+            x = line_start[0] + t * (line_end[0] - line_start[0])
+            y = line_start[1] + t * (line_end[1] - line_start[1])
+            dist_km = point_to_polygon_min_distance((x,y), polygon)
+            if dist_km * 1000 < safe_dist_m:
+                return True
+        for p in polygon:
+            dist_km = point_to_segment_distance(p, line_start, line_end)
+            if dist_km * 1000 < safe_dist_m:
+                return True
     else:
-        ax1.text(0.5, 0.5, '等待数据...', ha='center', va='center', fontsize=14)
-        ax2.text(0.5, 0.5, '等待数据...', ha='center', va='center', fontsize=14)
-        ax1.set_xlim(0, 10); ax1.set_ylim(0, 10)
-        ax2.set_xlim(0, 10); ax2.set_ylim(0, 10)
-    plt.tight_layout()
-    return fig
+        if point_in_polygon(line_start, polygon) or point_in_polygon(line_end, polygon):
+            return True
+    return False
+
+def get_polygon_center(polygon):
+    lng_sum = sum(p[0] for p in polygon)
+    lat_sum = sum(p[1] for p in polygon)
+    return lng_sum/len(polygon), lat_sum/len(polygon)
+
+# ==================== 避障算法 ====================
+def offset_point_away_from_polygon(pt, polygon, dist_km):
+    cx, cy = get_polygon_center(polygon)
+    dx = pt[0] - cx
+    dy = pt[1] - cy
+    length = sqrt(dx*dx + dy*dy)
+    if length < 1e-9:
+        return (pt[0] + dist_km/111.0, pt[1])
+    delta_deg = dist_km / 111.0
+    new_x = pt[0] + (dx / length) * delta_deg
+    new_y = pt[1] + (dy / length) * delta_deg
+    return (new_x, new_y)
+
+def get_side_waypoints(polygon, start, end, safe_dist_km, side='left'):
+    center = get_polygon_center(polygon)
+    best_vertex = None
+    best_side_val = None
+    for v in polygon:
+        side_val = (end[0]-start[0])*(v[1]-start[1]) - (end[1]-start[1])*(v[0]-start[0])
+        if side == 'left' and side_val > 0:
+            if best_side_val is None or side_val > best_side_val:
+                best_side_val = side_val
+                best_vertex = v
+        elif side == 'right' and side_val < 0:
+            if best_side_val is None or side_val < best_side_val:
+                best_side_val = side_val
+                best_vertex = v
+    if best_vertex is None:
+        best_vertex = min(polygon, key=lambda p: haversine(p[0], p[1], center[0], center[1]))
+    wp = offset_point_away_from_polygon(best_vertex, polygon, safe_dist_km)
+    if point_in_polygon(wp, polygon):
+        wp = offset_point_away_from_polygon(wp, polygon, safe_dist_km*2)
+    return wp
+
+def find_path_with_side(start, end, obstacles, flight_altitude, safe_dist_km, side, depth=0):
+    MAX_DEPTH = 8
+    if depth > MAX_DEPTH:
+        return [(start, end)]
+    safe_dist_m = safe_dist_km * 1000
+    blocking = []
+    for obs in obstacles:
+        if obs.get('height', 50) >= flight_altitude:
+            poly = obs['coordinates']
+            if line_polygon_intersect(start, end, poly, safe_dist_m):
+                blocking.append(obs)
+    if not blocking:
+        return [(start, end)]
+    obs = blocking[0]
+    poly = obs['coordinates']
+    if side == 'optimal':
+        left_wp = get_side_waypoints(poly, start, end, safe_dist_km, 'left')
+        right_wp = get_side_waypoints(poly, start, end, safe_dist_km, 'right')
+        left_path = find_path_with_side(start, left_wp, obstacles, flight_altitude, safe_dist_km, 'optimal', depth+1)
+        right_path = find_path_with_side(start, right_wp, obstacles, flight_altitude, safe_dist_km, 'optimal', depth+1)
+        left_path2 = find_path_with_side(left_wp, end, obstacles, flight_altitude, safe_dist_km, 'optimal', depth+1)
+        right_path2 = find_path_with_side(right_wp, end, obstacles, flight_altitude, safe_dist_km, 'optimal', depth+1)
+        left_total = sum(haversine(p[0][0], p[0][1], p[1][0], p[1][1]) for p in left_path + left_path2)
+        right_total = sum(haversine(p[0][0], p[0][1], p[1][0], p[1][1]) for p in right_path + right_path2)
+        if left_total < right_total:
+            return left_path + left_path2
+        else:
+            return right_path + right_path2
+    else:
+        wp = get_side_waypoints(poly, start, end, safe_dist_km, side)
+        path1 = find_path_with_side(start, wp, obstacles, flight_altitude, safe_dist_km, side, depth+1)
+        path2 = find_path_with_side(wp, end, obstacles, flight_altitude, safe_dist_km, side, depth+1)
+        return path1 + path2
+
+# ==================== 曲线平滑 ====================
+def bezier_curve(points, num_points=50):
+    if len(points) < 2:
+        return points
+    smoothed = []
+    for i in range(len(points)-1):
+        p0 = points[i]
+        p3 = points[i+1]
+        if i == 0:
+            p1 = (p0[0] + (p3[0]-p0[0])*0.25, p0[1] + (p3[1]-p0[1])*0.25)
+        else:
+            p1 = (p0[0] + (p3[0]-points[i-1][0])*0.2, p0[1] + (p3[1]-points[i-1][1])*0.2)
+        if i == len(points)-2:
+            p2 = (p3[0] - (p3[0]-p0[0])*0.25, p3[1] - (p3[1]-p0[1])*0.25)
+        else:
+            p2 = (p3[0] - (points[i+2][0]-p0[0])*0.2, p3[1] - (points[i+2][1]-p0[1])*0.2)
+        for t in np.linspace(0, 1, num_points//(len(points)-1)):
+            x = (1-t)**3 * p0[0] + 3*(1-t)**2*t * p1[0] + 3*(1-t)*t**2 * p2[0] + t**3 * p3[0]
+            y = (1-t)**3 * p0[1] + 3*(1-t)**2*t * p1[1] + 3*(1-t)*t**2 * p2[1] + t**3 * p3[1]
+            smoothed.append((x, y))
+    smoothed.append(points[-1])
+    unique = []
+    for p in smoothed:
+        if not unique or haversine(p[0], p[1], unique[-1][0], unique[-1][1]) > 1e-6:
+            unique.append(p)
+    return unique
+
+# ==================== 垂直悬停点生成 ====================
+def get_perpendicular_hover_point(end_point, approach_dir, distance_m=10.0, side='right'):
+    ux, uy = approach_dir
+    if side == 'left':
+        nx = -uy
+        ny = ux
+    else:
+        nx = uy
+        ny = -ux
+    dist_deg = distance_m / 1000.0 / 111.0
+    lon = end_point[0] + nx * dist_deg
+    lat = end_point[1] + ny * dist_deg
+    candidate = (lon, lat)
+    actual_dist = haversine(end_point[0], end_point[1], candidate[0], candidate[1]) * 1000
+    if abs(actual_dist - distance_m) > 0.1:
+        scale = distance_m / actual_dist
+        lon = end_point[0] + nx * dist_deg * scale
+        lat = end_point[1] + ny * dist_deg * scale
+        candidate = (lon, lat)
+    return candidate
+
+def get_safe_hover_point(end_point, approach_dir, obstacles, flight_altitude, distance_m=10.0):
+    candidates = []
+    for side in ['left', 'right']:
+        pt = get_perpendicular_hover_point(end_point, approach_dir, distance_m, side)
+        safe = True
+        for obs in obstacles:
+            if obs.get('height', 50) >= flight_altitude:
+                if point_in_polygon(pt, obs['coordinates']):
+                    safe = False
+                    break
+        def point_to_segment_distance_approx(p, a, b):
+            x0,y0=p; x1,y1=a; x2,y2=b
+            dx=x2-x1; dy=y2-y1
+            if dx==0 and dy==0:
+                return haversine(x0,y0,x1,y1)
+            t = ((x0-x1)*dx + (y0-y1)*dy) / (dx*dx+dy*dy)
+            t = max(0, min(1, t))
+            proj_x = x1 + t*dx
+            proj_y = y1 + t*dy
+            return haversine(x0,y0,proj_x,proj_y)
+        line_start = (end_point[0] - approach_dir[0]*0.01, end_point[1] - approach_dir[1]*0.01)
+        line_end = end_point
+        d = point_to_segment_distance_approx(pt, line_start, line_end)
+        if d < 0.001:
+            safe = False
+        if safe:
+            candidates.append((pt, side))
+    if candidates:
+        return candidates[0][0], True
+    else:
+        back_pt = (end_point[0] - approach_dir[0] * distance_m/1000/111.0,
+                   end_point[1] - approach_dir[1] * distance_m/1000/111.0)
+        actual = haversine(end_point[0], end_point[1], back_pt[0], back_pt[1])*1000
+        if abs(actual - distance_m) > 0.1:
+            scale = distance_m / actual
+            back_pt = (end_point[0] - approach_dir[0] * distance_m/1000/111.0 * scale,
+                       end_point[1] - approach_dir[1] * distance_m/1000/111.0 * scale)
+        return back_pt, False
+
+def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km=0.01):
+    min_dist = float('inf')
+    nearest_obs = None
+    for obs in obstacles:
+        if obs.get('height', 50) >= flight_altitude:
+            poly = obs['coordinates']
+            dist = point_to_polygon_min_distance(destination, poly)
+            if dist < min_dist:
+                min_dist = dist
+                nearest_obs = obs.get('name', '未知障碍物')
+    if min_dist < safe_radius_km:
+        return False, min_dist, nearest_obs
+    return True, min_dist, None
 
 # ==================== 飞行监控模拟器 ====================
 class FlightSimulator:
@@ -379,6 +406,162 @@ class FlightSimulator:
                 dist_accum += seg_dist
         progress = self.dist_traveled / self.total_distance if self.total_distance > 0 else 1
         self.battery_percent = max(0, 100 * (1 - progress * 0.95))
+
+# ==================== 心跳模拟器 ====================
+class DroneHeartbeatSimulator:
+    def __init__(self, timeout_seconds=3):
+        self.timeout_seconds = timeout_seconds
+        self.sequence_number = 0
+        self.heartbeat_history = deque(maxlen=100)
+        self.timeout_events = deque(maxlen=20)
+        self.last_received_time = time.time()
+        self.start_time = time.time()
+        self.total_sent = 0
+        self.total_lost = 0
+        self.last_timeout_time = 0
+
+    def get_beijing_time(self):
+        return datetime.datetime.now(BEIJING_TZ)
+
+    def generate_heartbeat(self):
+        timestamp = self.get_beijing_time()
+        self.total_sent += 1
+        if random.random() < 0.1:
+            self.total_lost += 1
+            self._check_timeout()
+            return None
+        delay_ms = random.uniform(100, 500)
+        receive_time = self.get_beijing_time()
+        record = {
+            'sequence': self.sequence_number,
+            'send_time': timestamp,
+            'receive_time': receive_time,
+            'delay_ms': delay_ms,
+            'status': 'received'
+        }
+        self.heartbeat_history.append(record)
+        self.last_received_time = time.time()
+        self.sequence_number += 1
+        self._check_timeout()
+        return record
+
+    def _check_timeout(self):
+        current_time = time.time()
+        if current_time - self.last_received_time > self.timeout_seconds:
+            if current_time - self.last_timeout_time > 1:
+                self.timeout_events.append({
+                    'time': self.get_beijing_time(),
+                    'duration': current_time - self.last_received_time
+                })
+                self.last_timeout_time = current_time
+
+    def get_recent_data(self, window_size=30):
+        sequences, delays, receive_times = [], [], []
+        if not self.heartbeat_history:
+            return sequences, delays, receive_times
+        for record in self.heartbeat_history:
+            if record and isinstance(record, dict):
+                sequences.append(record.get('sequence', 0))
+                delays.append(record.get('delay_ms', 0))
+                receive_times.append(record.get('receive_time', datetime.datetime.now(BEIJING_TZ)))
+        if len(sequences) > window_size:
+            sequences = sequences[-window_size:]
+            delays = delays[-window_size:]
+            receive_times = receive_times[-window_size:]
+        return sequences, delays, receive_times
+
+    def get_statistics(self):
+        if not self.heartbeat_history:
+            return {'avg_delay': 0, 'min_delay': 0, 'max_delay': 0, 'packet_loss_rate': 0, 'received_count': 0}
+        delays = [r['delay_ms'] for r in self.heartbeat_history if isinstance(r, dict) and 'delay_ms' in r]
+        if not delays:
+            return {'avg_delay': 0, 'min_delay': 0, 'max_delay': 0, 'packet_loss_rate': 0, 'received_count': len(self.heartbeat_history)}
+        packet_loss_rate = (self.total_lost / self.total_sent * 100) if self.total_sent > 0 else 0
+        return {
+            'avg_delay': sum(delays) / len(delays),
+            'min_delay': min(delays),
+            'max_delay': max(delays),
+            'packet_loss_rate': packet_loss_rate,
+            'received_count': len(self.heartbeat_history)
+        }
+
+# ==================== 辅助函数 ====================
+def get_beijing_time_info():
+    now = datetime.datetime.now(BEIJING_TZ)
+    return {
+        'datetime': now,
+        'time_str': now.strftime('%Y年%m月%d日 %H:%M:%S'),
+        'weekday': now.strftime('%A'),
+        'timezone': 'Asia/Shanghai (UTC+8)'
+    }
+
+def format_beijing_time(dt):
+    if dt is None:
+        return "N/A"
+    if dt.tzinfo is None:
+        dt = BEIJING_TZ.localize(dt)
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, timeout_events):
+    plt.style.use('seaborn-v0_8-darkgrid')
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+    if sequences and delays and receive_times and len(sequences) > 0:
+        try:
+            ax1.plot(receive_times, delays, 'b-o', markersize=6, linewidth=2)
+            ax1.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
+            ax1.set_ylabel('延迟 (ms)', fontsize=12, fontweight='bold')
+            ax1.set_title('实时心跳延迟监控（按北京时间）', fontsize=14, fontweight='bold')
+            ax1.grid(True, alpha=0.3, linestyle='--')
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
+            plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            if delays:
+                avg_delay = sum(delays) / len(delays)
+                ax1.axhline(y=avg_delay, color='r', linestyle='--', linewidth=2, label=f'平均延迟: {avg_delay:.1f}ms')
+                ax1.legend(loc='upper right')
+            ax1.axhline(y=400, color='orange', linestyle=':', linewidth=1.5, label='延迟阈值: 400ms', alpha=0.7)
+            threshold = 400
+            above_threshold = [d if d > threshold else threshold for d in delays]
+            ax1.fill_between(receive_times, threshold, above_threshold, alpha=0.3, color='red', label='超出阈值')
+            ax2.plot(receive_times, sequences, 'g-o', markersize=6, linewidth=2)
+            ax2.set_xlabel('接收时间（北京时间）', fontsize=12, fontweight='bold')
+            ax2.set_ylabel('心跳序号', fontsize=12, fontweight='bold')
+            ax2.set_title(f'心跳序号接收情况 | 超时次数: {timeout_count}', fontsize=14, fontweight='bold')
+            ax2.grid(True, alpha=0.3, linestyle='--')
+            ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
+            plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+            if timeout_events and len(timeout_events) > 0:
+                now_beijing = datetime.datetime.now(BEIJING_TZ)
+                recent_timeouts = [e for e in timeout_events if e and isinstance(e, dict) and 'time' in e and (now_beijing - e['time']).total_seconds() < 10]
+                if recent_timeouts:
+                    ax2.text(0.02, 0.98, f"⚠️ 最近超时: {len(recent_timeouts)}次", transform=ax2.transAxes, fontsize=11,
+                            verticalalignment='top', fontweight='bold', bbox=dict(boxstyle='round', facecolor='red', alpha=0.3))
+        except Exception as e:
+            ax1.text(0.5, 0.5, f'绘图错误: {str(e)}', ha='center', va='center')
+            ax2.text(0.5, 0.5, '请检查数据', ha='center', va='center')
+    else:
+        ax1.text(0.5, 0.5, '等待数据...', ha='center', va='center', fontsize=14)
+        ax2.text(0.5, 0.5, '等待数据...', ha='center', va='center', fontsize=14)
+        ax1.set_xlim(0, 10); ax1.set_ylim(0, 10)
+        ax2.set_xlim(0, 10); ax2.set_ylim(0, 10)
+    plt.tight_layout()
+    return fig
+
+# ==================== 障碍物管理 ====================
+def load_obstacles():
+    if os.path.exists(OBSTACLE_FILE):
+        try:
+            with open(OBSTACLE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_obstacles(obstacles):
+    with open(OBSTACLE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(obstacles, f, ensure_ascii=False, indent=2)
 
 # ==================== 通信链路拓扑HTML组件 ====================
 def link_topology_html(delay_ms, loss_rate):
@@ -616,7 +799,7 @@ if st.session_state.page == "心跳监控":
             st.pyplot(fig2)
             plt.close(fig2)
 
-# ==================== 页面2：任务执行（优化显示） ====================
+# ==================== 页面2：任务执行 ====================
 elif st.session_state.page == "任务执行":
     st.header("✈️ 飞行实时画面 - 任务执行监控")
     
@@ -685,10 +868,10 @@ elif st.session_state.page == "任务执行":
     with map_col:
         st.subheader("实时飞行地图")
         if sim.current_pos is None:
-            st.error("当前位置无效")
+            st.error("当前位置无效，请检查航线规划")
             st.stop()
         center_lat, center_lon = sim.current_pos[1], sim.current_pos[0]
-        # 使用 OpenStreetMap 保证稳定
+        # 固定使用 OSM 保证稳定
         tiles_url = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         attr = "OpenStreetMap"
         m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles=tiles_url, attr=attr)
@@ -751,7 +934,7 @@ elif st.session_state.page == "任务执行":
         time.sleep(0.5)
         st.rerun()
 
-# ==================== 页面3：航线规划（使用新避障算法） ====================
+# ==================== 页面3：航线规划 ====================
 elif st.session_state.page == "航线规划":
     st.header("🗺️ 航线规划 · 多路径选择 + 安全半径约束")
     
@@ -876,12 +1059,16 @@ elif st.session_state.page == "航线规划":
             start_point = (st.session_state.a_point['lon_gcj'], st.session_state.a_point['lat_gcj'])
             end_point = (st.session_state.b_point['lon_gcj'], st.session_state.b_point['lat_gcj'])
             
-            # 过滤需要避让的障碍物（高度大于等于飞行高度）
-            blocking_obs = [obs for obs in st.session_state.obstacles if obs.get('height', 50) >= st.session_state.flight_altitude]
-            if avoidance_enabled and blocking_obs:
-                # 使用 A* 算法寻找路径
-                safe_dist_m = st.session_state.safe_distance * 1000
-                segments = find_path_a_star(start_point, end_point, blocking_obs, safe_dist_m)
+            original_dist = haversine(start_point[0], start_point[1], end_point[0], end_point[1])
+            if avoidance_enabled:
+                side_key = {"最优路径": "optimal", "左侧绕行": "left", "右侧绕行": "right"}[st.session_state.route_side]
+                segments = find_path_with_side(
+                    start_point, end_point,
+                    st.session_state.obstacles,
+                    st.session_state.flight_altitude,
+                    st.session_state.safe_distance,
+                    side_key
+                )
             else:
                 segments = [(start_point, end_point)]
             
@@ -893,27 +1080,9 @@ elif st.session_state.page == "航线规划":
                 waypoints.append(seg[1])
             st.session_state.planned_waypoints = waypoints
             
-            # 计算总距离
-            total_dist = sum(haversine(s[0][0], s[0][1], s[1][0], s[1][1]) for s in segments)
-            original_dist = haversine(start_point[0], start_point[1], end_point[0], end_point[1])
-            extra = total_dist - original_dist
-            if avoidance_enabled and blocking_obs:
-                st.markdown(f'<div class="info-text">✨ A* 避障路径 | 总距离 {total_dist:.3f} km (+{extra:.3f} km)</div>', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="safe-text">✅ 直线航线（无避障）| 距离 {original_dist:.3f} km</div>', unsafe_allow_html=True)
-            
-            # 降落安全处理（简化版，保持原有逻辑）
+            # 降落安全处理
             if landing_safety and st.session_state.b_point:
-                # 检查终点10米内是否有障碍物
-                from shapely.geometry import Point
-                dest_point = Point(end_point[0], end_point[1])
-                safe = True
-                for obs in blocking_obs:
-                    poly = points_to_polygon(obs['coordinates'])
-                    expanded = expand_polygon(poly, 10.0)
-                    if dest_point.distance(expanded) < 0.0001:  # 10米内
-                        safe = False
-                        break
+                safe, dist_to_obs, obs_name = check_landing_safety(end_point, st.session_state.obstacles, st.session_state.flight_altitude, safe_radius_km=0.01)
                 if not safe and len(waypoints) > 1:
                     # 在最后一段倒退10米方向生成悬停点
                     last_seg = segments[-1]
@@ -925,12 +1094,21 @@ elif st.session_state.page == "航线规划":
                     if length > 1e-9:
                         ux = dx / length
                         uy = dy / length
-                        # 向远离终点方向偏移10米
                         offset_km = 0.01
                         hover_lon = p2[0] - ux * offset_km / 111.0
                         hover_lat = p2[1] - uy * offset_km / 111.0
                         waypoints[-1] = (hover_lon, hover_lat)
                         st.warning("⚠️ 终点10米内有障碍物，已自动在终点外10米处设置悬停点。")
+                else:
+                    st.success("✅ 降落点安全")
+            
+            # 计算总距离
+            total_dist = sum(haversine(waypoints[i][0], waypoints[i][1], waypoints[i+1][0], waypoints[i+1][1]) for i in range(len(waypoints)-1))
+            extra = total_dist - original_dist
+            if avoidance_enabled:
+                st.markdown(f'<div class="info-text">✨ {st.session_state.route_side} | 总距离 {total_dist:.3f} km (+{extra:.3f} km)</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="safe-text">✅ 直线航线 | 距离 {original_dist:.3f} km</div>', unsafe_allow_html=True)
         else:
             st.info("请先设置 A 点和 B 点")
     
@@ -974,27 +1152,11 @@ elif st.session_state.page == "航线规划":
             # 绕行点标记
             for i in range(1, len(polyline_pts)-1):
                 wp = polyline_pts[i]
-                folium.CircleMarker(location=[wp[1], wp[0]], radius=6, color='orange', fill=True, popup=f"绕行点 {i}").add_to(m)
+                folium.CircleMarker(location=[wp[1], wp[0]], radius=6, color='orange', fill=True).add_to(m)
             # 曲线平滑
             if st.session_state.curve_smooth and len(polyline_pts) >= 2:
                 try:
-                    # 简单贝塞尔曲线替代函数
-                    def smooth_bezier(points, num=50):
-                        if len(points) < 2:
-                            return points
-                        smoothed = []
-                        for i in range(len(points)-1):
-                            p0 = points[i]
-                            p3 = points[i+1]
-                            p1 = (p0[0] + (p3[0]-p0[0])*0.25, p0[1] + (p3[1]-p0[1])*0.25)
-                            p2 = (p3[0] - (p3[0]-p0[0])*0.25, p3[1] - (p3[1]-p0[1])*0.25)
-                            for t in np.linspace(0, 1, num):
-                                x = (1-t)**3 * p0[0] + 3*(1-t)**2*t * p1[0] + 3*(1-t)*t**2 * p2[0] + t**3 * p3[0]
-                                y = (1-t)**3 * p0[1] + 3*(1-t)**2*t * p1[1] + 3*(1-t)*t**2 * p2[1] + t**3 * p3[1]
-                                smoothed.append((x, y))
-                        smoothed.append(points[-1])
-                        return smoothed
-                    smooth_pts = smooth_bezier(polyline_pts, num=80)
+                    smooth_pts = bezier_curve(polyline_pts, num_points=80)
                     smooth_line = [[p[1], p[0]] for p in smooth_pts]
                     folium.PolyLine(smooth_line, color='#FF69B4', weight=3, opacity=0.6, dash_array='5,5').add_to(m)
                 except:
