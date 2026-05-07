@@ -118,13 +118,11 @@ def point_to_polygon_min_distance(point, polygon):
     return min_dist
 
 def line_polygon_intersect_with_safety(line_start, line_end, polygon, safe_dist_m):
-    # 快速检测：线段与多边形边相交
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i+1) % len(polygon)]
         if segments_intersect(line_start, line_end, p1, p2):
             return True
-    # 线段上的采样点检测
     num_samples = max(20, int(haversine(line_start[0], line_start[1], line_end[0], line_end[1]) * 1000 / 5))
     for i in range(num_samples+1):
         t = i / num_samples
@@ -133,7 +131,6 @@ def line_polygon_intersect_with_safety(line_start, line_end, polygon, safe_dist_
         dist_km = point_to_polygon_min_distance((x, y), polygon)
         if dist_km * 1000 < safe_dist_m:
             return True
-    # 多边形顶点到线段距离
     for p in polygon:
         dist_km = point_to_segment_distance(p, line_start, line_end)
         if dist_km * 1000 < safe_dist_m:
@@ -868,7 +865,7 @@ elif st.session_state.page == "任务执行":
     map_col, topo_col = st.columns([2, 1])
     with map_col:
         st.subheader("实时飞行地图")
-        # 使用 OpenStreetMap 确保稳定显示
+        # 使用 OpenStreetMap 确保稳定显示（任务执行地图需要稳定，避免白屏）
         tiles_url = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         attr = "OpenStreetMap"
         m = folium.Map(location=[sim.current_pos[1], sim.current_pos[0]], zoom_start=16, tiles=tiles_url, attr=attr)
@@ -925,7 +922,7 @@ elif st.session_state.page == "任务执行":
         time.sleep(0.5)
         st.rerun()
 
-# ==================== 页面3：航线规划（修复路线显示错误） ====================
+# ==================== 页面3：航线规划（修改点：use_osm 默认 False） ====================
 elif st.session_state.page == "航线规划":
     st.header("🗺️ 航线规划 · 多路径选择 + 安全半径约束")
     
@@ -1037,7 +1034,8 @@ elif st.session_state.page == "航线规划":
         
         st.divider()
         st.subheader("🗺️ 地图底图样式")
-        use_osm = st.checkbox("使用 OpenStreetMap 底图（推荐，避免白屏）", value=True)
+        # 用户要求：不要默认勾选 OpenStreetMap，即默认使用高德
+        use_osm = st.checkbox("使用 OpenStreetMap 底图（备选）", value=False)   # 修改为 False
         if not use_osm:
             style_choice = st.radio("选择地图类型", ["卫星影像", "矢量街道"], index=0 if st.session_state.map_style == "卫星影像" else 1)
             st.session_state.map_style = style_choice
@@ -1143,11 +1141,9 @@ elif st.session_state.page == "航线规划":
             else:
                 final_segments = [(start_pt, end_pt)]
             
-            # 确保至少有一条线段
             if not final_segments:
                 final_segments = [(start_pt, end_pt)]
             
-            # 绘制航线（三段式颜色）
             colors = ['#00FF00', '#00BFFF', '#1E90FF', '#32CD32']
             polyline_pts = [final_segments[0][0]]
             for idx, seg in enumerate(final_segments):
@@ -1155,12 +1151,10 @@ elif st.session_state.page == "航线规划":
                 line_pts = [[seg[0][1], seg[0][0]], [seg[1][1], seg[1][0]]]
                 folium.PolyLine(line_pts, color=colors[idx % len(colors)], weight=4, opacity=0.9, tooltip=f"航段 {idx+1}").add_to(m)
             
-            # 添加绕行点标记（橙色圆圈）
             for i in range(1, len(polyline_pts)-1):
                 wp = polyline_pts[i]
                 folium.CircleMarker(location=[wp[1], wp[0]], radius=6, color='orange', fill=True, fill_opacity=0.8, popup=f"绕行点 {i}").add_to(m)
             
-            # 曲线平滑（可选）
             if st.session_state.curve_smooth and len(polyline_pts) >= 2:
                 try:
                     smooth_pts = bezier_curve(polyline_pts, num_points=100)
@@ -1169,7 +1163,6 @@ elif st.session_state.page == "航线规划":
                 except:
                     pass
             
-            # 总距离标签
             total_dist = sum(haversine(s[0][0], s[0][1], s[1][0], s[1][1]) for s in final_segments)
             original_dist = haversine(start_pt[0], start_pt[1], end_pt[0], end_pt[1])
             extra = total_dist - original_dist
