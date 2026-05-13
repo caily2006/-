@@ -57,7 +57,7 @@ def haversine(lon1, lat1, lon2, lat2):
     c = 2 * asin(sqrt(a))
     return R * c
 
-# ==================== 基础几何工具 ====================
+# ==================== 几何工具 ====================
 def on_segment(p, q, r):
     if (q[0] <= max(p[0], r[0]) and q[0] >= min(p[0], r[0]) and
         q[1] <= max(p[1], r[1]) and q[1] >= min(p[1], r[1])):
@@ -152,14 +152,14 @@ def segment_intersects_expanded_polygon(p1, p2, expanded_poly):
             return True
     return False
 
-# ==================== 简单可靠的避障算法 ====================
+# ==================== 可靠避障算法（基于膨胀顶点 + Dijkstra） ====================
 def find_safe_path(start, end, obstacles, flight_altitude, safe_dist_m):
     # 过滤需要避让的障碍物
     blocking_obs = [obs for obs in obstacles if obs.get('height', 50) >= flight_altitude]
     if not blocking_obs:
         return [(start, end)], True
 
-    # 生成膨胀多边形
+    # 膨胀多边形
     expanded_polys = []
     for obs in blocking_obs:
         poly = obs['coordinates']
@@ -172,67 +172,63 @@ def find_safe_path(start, end, obstacles, flight_altitude, safe_dist_m):
                 return False
         return True
 
-    # 1. 尝试直线
-    if segment_safe(start, end):
-        return [(start, end)], True
-
-    # 2. 尝试中点左右偏移
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length = sqrt(dx*dx + dy*dy)
-    if length > 0:
-        ux = dx / length
-        uy = dy / length
-        perp_x = -uy
-        perp_y = ux
-        # 安全偏移距离（米转度）
-        offset_deg = safe_dist_m / 111000.0
-        mid = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
-        left = (mid[0] + perp_x * offset_deg, mid[1] + perp_y * offset_deg)
-        right = (mid[0] - perp_x * offset_deg, mid[1] - perp_y * offset_deg)
-        if segment_safe(start, left) and segment_safe(left, end):
-            return [(start, left), (left, end)], True
-        if segment_safe(start, right) and segment_safe(right, end):
-            return [(start, right), (right, end)], True
-
-    # 3. 收集膨胀多边形的顶点，使用最近的可视点
-    vertices = []
+    # 收集所有膨胀多边形的顶点作为候选节点
+    nodes = [start, end]
     for exp in expanded_polys:
         for v in exp:
-            vertices.append(v)
+            nodes.append(v)
     # 去重
-    unique_verts = []
-    for v in vertices:
-        if not any(haversine(v[0], v[1], u[0], u[1]) < 1e-6 for u in unique_verts):
-            unique_verts.append(v)
+    unique_nodes = []
+    for p in nodes:
+        if not any(haversine(p[0], p[1], q[0], q[1]) < 1e-6 for q in unique_nodes):
+            unique_nodes.append(p)
+    nodes = unique_nodes
 
-    # 找到起点可见且距离最近的顶点
-    start_visible = []
-    for v in unique_verts:
-        if segment_safe(start, v):
-            start_visible.append((v, haversine(start[0], start[1], v[0], v[1])))
-    start_visible.sort(key=lambda x: x[1])
+    # 构建邻接矩阵（Dijkstra）
+    n = len(nodes)
+    adj = [[] for _ in range(n)]
+    for i in range(n):
+        for j in range(i+1, n):
+            if segment_safe(nodes[i], nodes[j]):
+                w = haversine(nodes[i][0], nodes[i][1], nodes[j][0], nodes[j][1])
+                adj[i].append((j, w))
+                adj[j].append((i, w))
 
-    # 找到终点可见且距离最近的顶点
-    end_visible = []
-    for v in unique_verts:
-        if segment_safe(v, end):
-            end_visible.append((v, haversine(v[0], v[1], end[0], end[1])))
-    end_visible.sort(key=lambda x: x[1])
+    # 找到起点和终点的索引
+    start_idx = nodes.index(start)
+    end_idx = nodes.index(end)
 
-    if start_visible and end_visible:
-        # 尝试找到两个可视点之间的直接连线
-        for sv, _ in start_visible[:5]:
-            for ev, _ in end_visible[:5]:
-                if segment_safe(sv, ev):
-                    return [(start, sv), (sv, ev), (ev, end)], True
-        # 取最近的点作为中转
-        sv = start_visible[0][0]
-        ev = end_visible[0][0]
-        return [(start, sv), (sv, ev), (ev, end)], True
+    # Dijkstra
+    import heapq
+    dist = [float('inf')] * n
+    prev = [-1] * n
+    dist[start_idx] = 0
+    pq = [(0, start_idx)]
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist[u]:
+            continue
+        if u == end_idx:
+            break
+        for v, w in adj[u]:
+            if dist[u] + w < dist[v]:
+                dist[v] = dist[u] + w
+                prev[v] = u
+                heapq.heappush(pq, (dist[v], v))
 
-    # 4. 保底：返回直线（不安全）
-    return [(start, end)], False
+    if dist[end_idx] == float('inf'):
+        # 无路径，返回直线（不安全）
+        return [(start, end)], False
+
+    # 重建路径
+    path = []
+    cur = end_idx
+    while cur != -1:
+        path.append(nodes[cur])
+        cur = prev[cur]
+    path.reverse()
+    segments = [(path[i], path[i+1]) for i in range(len(path)-1)]
+    return segments, True
 
 # ==================== 曲线平滑 ====================
 def bezier_curve(points, num_points=50):
@@ -953,9 +949,9 @@ elif st.session_state.page == "任务执行":
         time.sleep(0.5)
         st.rerun()
 
-# ==================== 页面3：航线规划（优化避障，确保可绕行） ====================
+# ==================== 页面3：航线规划（Dijkstra 可靠避障） ====================
 elif st.session_state.page == "航线规划":
-    st.header("🗺️ 航线规划 · 可靠避障（保证可绕行）")
+    st.header("🗺️ 航线规划 · Dijkstra 最优避障路径")
 
     left_col, right_col = st.columns([1, 2])
     with left_col:
