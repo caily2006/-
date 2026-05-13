@@ -796,6 +796,7 @@ if st.session_state.page == "心跳监控":
 elif st.session_state.page == "任务执行":
     st.header("✈️ 飞行实时画面 - 任务执行监控")
     
+    # 初始化规划航线（如果没有则使用临时直线）
     if not st.session_state.planned_waypoints:
         if st.session_state.a_point and st.session_state.b_point:
             start_pt = (st.session_state.a_point['lon_gcj'], st.session_state.a_point['lat_gcj'])
@@ -806,13 +807,14 @@ elif st.session_state.page == "任务执行":
             st.warning("⚠️ 请先在「航线规划」页面设置A点和B点并生成航线。")
             st.stop()
     
+    # 初始化或更新飞行模拟器
     if (st.session_state.flight_sim is None or 
         st.session_state.flight_sim.waypoints != st.session_state.planned_waypoints):
         st.session_state.flight_sim = FlightSimulator(st.session_state.planned_waypoints, 
                                                       speed_mps=st.session_state.flight_speed)
     
     sim = st.session_state.flight_sim
-    sim.update()  # 关键：每次页面刷新时更新位置
+    sim.update()  # 关键：根据实际时间推进位置
     
     # 控制按钮
     col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
@@ -836,7 +838,7 @@ elif st.session_state.page == "任务执行":
                                                           speed_mps=st.session_state.flight_speed)
             sim = st.session_state.flight_sim
     
-    # 状态与指标
+    # 显示状态和各项指标
     status_text = "▶ 飞行中" if sim.is_running else ("⏸ 已暂停" if sim.is_paused else "⏹ 已停止")
     st.markdown(f"<div style='text-align:center; font-size:20px; margin:10px 0;'>{status_text}</div>", 
                 unsafe_allow_html=True)
@@ -856,7 +858,7 @@ elif st.session_state.page == "任务执行":
     col4.metric("剩余距离", f"{remaining_dist/1000:.2f} km")
     col5.metric("预计到达", eta_str)
     
-    # 电量显示（使用模拟器中的电量，已调整系数）
+    # 电量（模拟器已更新电池百分比）
     st.metric("🔋 电量模拟", f"{sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     st.caption(f"📍 当前坐标: {sim.current_pos[0]:.6f}, {sim.current_pos[1]:.6f}")  # 调试信息
@@ -865,18 +867,32 @@ elif st.session_state.page == "任务执行":
     map_col, topo_col = st.columns([2, 1])
     with map_col:
         st.subheader("实时飞行地图")
+        # 确定地图底图：优先使用高德卫星影像（默认），若用户勾选“使用 OpenStreetMap”则切换
+        # 从 session_state 中获取用户偏好（航线规划页面设置的 map_style 和 use_osm）
+        # 为独立控制，在任务执行页面增加一个复选框
+        use_osm_map = st.checkbox("使用 OpenStreetMap 底图（备选）", value=False, key="task_use_osm")
+        if use_osm_map:
+            tiles_url = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            attr = "OpenStreetMap"
+        else:
+            # 默认高德卫星影像
+            if st.session_state.map_style == "卫星影像":
+                tiles_url = f"https://webst01.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
+                attr = "高德卫星图"
+            else:
+                tiles_url = f"https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
+                attr = "高德矢量街道图"
+        
+        # 地图中心跟随无人机当前位置
         center_lat, center_lon = sim.current_pos[1], sim.current_pos[0]
-        # 使用 OpenStreetMap 保证稳定显示
-        tiles_url = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        attr = "OpenStreetMap"
         m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles=tiles_url, attr=attr)
         
-        # 规划航线（蓝色）
+        # 绘制规划航线（蓝色）
         if st.session_state.planned_waypoints:
             line_points = [[p[1], p[0]] for p in st.session_state.planned_waypoints]
             folium.PolyLine(line_points, color="blue", weight=4, opacity=0.8, tooltip="规划航线").add_to(m)
         
-        # 已飞路径（绿色）
+        # 绘制已飞路径（绿色）
         if sim.dist_traveled > 0 and len(st.session_state.planned_waypoints) > 1:
             flown = []
             dist_acc = 0
@@ -896,16 +912,18 @@ elif st.session_state.page == "任务执行":
                 flown_path = [[p[1], p[0]] for p in flown]
                 folium.PolyLine(flown_path, color="green", weight=5, opacity=0.9, tooltip="已飞路径").add_to(m)
         
-        # 当前位置（红色飞机图标）
+        # 无人机当前位置（红色飞机图标）
         folium.Marker(location=[sim.current_pos[1], sim.current_pos[0]],
                       icon=folium.Icon(color='red', icon='plane', prefix='fa'), 
                       popup="当前位置").add_to(m)
+        # 起点和终点标记
         if st.session_state.planned_waypoints:
             start = st.session_state.planned_waypoints[0]
             end = st.session_state.planned_waypoints[-1]
             folium.Marker(location=[start[1], start[0]], icon=folium.Icon(color='green', icon='play', prefix='fa'), popup="起点").add_to(m)
             folium.Marker(location=[end[1], end[0]], icon=folium.Icon(color='red', icon='stop', prefix='fa'), popup="终点").add_to(m)
         
+        # 显示障碍物（可选）
         if st.checkbox("显示障碍物", value=True, key="flight_show_obs"):
             for obs in st.session_state.obstacles:
                 coords = [[lat, lng] for lng, lat in obs['coordinates']]
@@ -923,11 +941,10 @@ elif st.session_state.page == "任务执行":
         st.markdown(link_topology_html(delay, loss), unsafe_allow_html=True)
         st.caption("数据来自实时心跳模拟")
     
-    # 自动刷新（飞行中时每0.5秒刷新）
+    # 自动刷新：飞行中时每 0.5 秒刷新页面以更新位置
     if sim.is_running:
         time.sleep(0.5)
         st.rerun()
-
 # ==================== 页面3：航线规划（完整保留，略作整理） ====================
 elif st.session_state.page == "航线规划":
     st.header("🗺️ 航线规划 · 多路径选择 + 垂直悬停点")
