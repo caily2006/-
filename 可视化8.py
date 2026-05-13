@@ -132,18 +132,18 @@ def line_polygon_intersect_with_safety(line_start, line_end, polygon, safe_dist_
             return True
     # 2. 线段上的采样点到多边形的最短距离
     line_len_km = haversine(line_start[0], line_start[1], line_end[0], line_end[1])
-    num_samples = min(30, max(10, int(line_len_km * 1000 / 10)))
+    num_samples = min(50, max(20, int(line_len_km * 1000 / 5)))   # 加密采样
     for i in range(num_samples+1):
         t = i / num_samples
         x = line_start[0] + t * (line_end[0] - line_start[0])
         y = line_start[1] + t * (line_end[1] - line_start[1])
         dist_km = point_to_polygon_min_distance((x, y), polygon)
-        if dist_km * 1000 < safe_dist_m:
+        if dist_km * 1000 < safe_dist_m - 1e-6:
             return True
     # 3. 多边形顶点到线段的最短距离
     for p in polygon:
         dist_km = point_to_segment_distance(p, line_start, line_end)
-        if dist_km * 1000 < safe_dist_m:
+        if dist_km * 1000 < safe_dist_m - 1e-6:
             return True
     return False
 
@@ -163,47 +163,55 @@ def get_polygon_center(polygon):
     lat_sum = sum(p[1] for p in polygon)
     return lng_sum/len(polygon), lat_sum/len(polygon)
 
-# ==================== 多路径避障算法（修复安全距离） ====================
+# ==================== 改进的绕行点生成（确保安全距离） ====================
 def point_side_of_line(point, line_start, line_end):
     return (line_end[0] - line_start[0]) * (point[1] - line_start[1]) - (line_end[1] - line_start[1]) * (point[0] - line_start[0])
 
-def offset_point_away_from_polygon(pt, polygon, dist_km):
-    cx = sum(v[0] for v in polygon) / len(polygon)
-    cy = sum(v[1] for v in polygon) / len(polygon)
-    dx = pt[0] - cx
-    dy = pt[1] - cy
-    length = sqrt(dx*dx + dy*dy)
-    if length < 1e-9:
-        return (pt[0] + dist_km/111.0, pt[1])
-    delta_deg = dist_km / 111.0
-    new_x = pt[0] + (dx / length) * delta_deg
-    new_y = pt[1] + (dy / length) * delta_deg
-    return (new_x, new_y)
-
-def get_side_waypoints(polygon, start, end, safe_dist_km, side='left'):
+def get_side_waypoints(polygon, start, end, safe_dist_km):
+    """
+    生成绕行点，保证该点与多边形边界距离 >= safe_dist_km
+    同时绕行点位于线段指定侧（由调用者通过 side 参数选择）
+    返回点坐标（GCJ-02）
+    """
     center = get_polygon_center(polygon)
+    # 收集所有多边形的边，向外扩展方向
     best_vertex = None
     best_side_val = None
+    # 先尝试找到最突出的顶点（离直线最远且在正确一侧）
     for v in polygon:
         side_val = point_side_of_line(v, start, end)
-        if side == 'left' and side_val > 0:
-            if best_side_val is None or side_val > best_side_val:
-                best_side_val = side_val
-                best_vertex = v
-        elif side == 'right' and side_val < 0:
-            if best_side_val is None or side_val < best_side_val:
-                best_side_val = side_val
-                best_vertex = v
+        # side 判断将在外部进行，这里先按绝对值最大找候选
+        if best_vertex is None or abs(side_val) > abs(best_side_val):
+            best_side_val = side_val
+            best_vertex = v
+    # 如果没有顶点在指定侧，用中心最近点
     if best_vertex is None:
         best_vertex = min(polygon, key=lambda p: haversine(p[0], p[1], center[0], center[1]))
-    wp = offset_point_away_from_polygon(best_vertex, polygon, safe_dist_km)
-    # 确保绕行点也在安全距离外（防止紧贴障碍物）
-    if point_to_polygon_min_distance(wp, polygon) * 1000 < safe_dist_km * 1000:
-        wp = offset_point_away_from_polygon(wp, polygon, safe_dist_km*2)
-    return wp
+    # 沿径向向外扩展 safe_dist_km 以上
+    dx = best_vertex[0] - center[0]
+    dy = best_vertex[1] - center[1]
+    length = sqrt(dx*dx + dy*dy)
+    if length < 1e-9:
+        offset_dir = (1.0, 0.0)
+    else:
+        offset_dir = (dx / length, dy / length)
+    # 计算需要偏移的度数（1度约111km）
+    delta_deg = safe_dist_km / 111.0
+    # 多次迭代确保距离足够
+    candidate = (best_vertex[0] + offset_dir[0] * delta_deg,
+                 best_vertex[1] + offset_dir[1] * delta_deg)
+    # 验证与多边形的最短距离，如果不足则继续外扩
+    for _ in range(5):
+        dist_km = point_to_polygon_min_distance(candidate, polygon)
+        if dist_km >= safe_dist_km - 1e-6:
+            break
+        # 不足则再扩大一倍
+        candidate = (candidate[0] + offset_dir[0] * delta_deg,
+                     candidate[1] + offset_dir[1] * delta_deg)
+    return candidate
 
 def find_path_with_side(start, end, obstacles, flight_altitude, safe_dist_km, side, depth=0):
-    MAX_DEPTH = 10
+    MAX_DEPTH = 12
     if depth > MAX_DEPTH:
         return [(start, end)], haversine(start[0], start[1], end[0], end[1])
     
@@ -222,26 +230,67 @@ def find_path_with_side(start, end, obstacles, flight_altitude, safe_dist_km, si
     poly = obs['coordinates']
     
     if side == 'optimal':
-        left_wp = get_side_waypoints(poly, start, end, safe_dist_km, 'left')
-        right_wp = get_side_waypoints(poly, start, end, safe_dist_km, 'right')
-        left_segs, left_dist = find_path_with_side(start, left_wp, obstacles, flight_altitude, safe_dist_km, 'optimal', depth+1)
-        right_segs, right_dist = find_path_with_side(start, right_wp, obstacles, flight_altitude, safe_dist_km, 'optimal', depth+1)
-        left_segs2, left_dist2 = find_path_with_side(left_wp, end, obstacles, flight_altitude, safe_dist_km, 'optimal', depth+1)
-        right_segs2, right_dist2 = find_path_with_side(right_wp, end, obstacles, flight_altitude, safe_dist_km, 'optimal', depth+1)
-        left_total = left_dist + left_dist2
-        right_total = right_dist + right_dist2
+        # 尝试左右两侧，分别生成绕行点并递归
+        left_wp = get_side_waypoints(poly, start, end, safe_dist_km)
+        right_wp = get_side_waypoints(poly, start, end, safe_dist_km)
+        # 强制确保绕行点在正确侧（符号检查）
+        # 左侧要求 point_side_of_line > 0，右侧要求 < 0
+        if point_side_of_line(left_wp, start, end) <= 0:
+            # 如果左侧点不在左侧，则沿法线手动调整
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            length = sqrt(dx*dx + dy*dy)
+            if length > 1e-9:
+                nx = -dy / length
+                ny = dx / length
+                left_wp = (left_wp[0] + nx * safe_dist_km/111.0,
+                           left_wp[1] + ny * safe_dist_km/111.0)
+        if point_side_of_line(right_wp, start, end) >= 0:
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            length = sqrt(dx*dx + dy*dy)
+            if length > 1e-9:
+                nx = dy / length
+                ny = -dx / length
+                right_wp = (right_wp[0] + nx * safe_dist_km/111.0,
+                            right_wp[1] + ny * safe_dist_km/111.0)
+        # 递归求解左右路径
+        left_segs1, left_dist1 = find_path_with_side(start, left_wp, obstacles, flight_altitude, safe_dist_km, 'left', depth+1)
+        right_segs1, right_dist1 = find_path_with_side(start, right_wp, obstacles, flight_altitude, safe_dist_km, 'right', depth+1)
+        left_segs2, left_dist2 = find_path_with_side(left_wp, end, obstacles, flight_altitude, safe_dist_km, 'left', depth+1)
+        right_segs2, right_dist2 = find_path_with_side(right_wp, end, obstacles, flight_altitude, safe_dist_km, 'right', depth+1)
+        left_total = left_dist1 + left_dist2
+        right_total = right_dist1 + right_dist2
         if left_total < right_total:
-            return left_segs + left_segs2, left_total
+            return left_segs1 + left_segs2, left_total
         else:
-            return right_segs + right_segs2, right_total
+            return right_segs1 + right_segs2, right_total
     else:
-        wp = get_side_waypoints(poly, start, end, safe_dist_km, side)
-        # 二次验证：确保绕行点不贴近其他障碍物
+        # 单侧绕行
+        wp = get_side_waypoints(poly, start, end, safe_dist_km)
+        # 确保绕行点在正确的一侧，否则翻转
+        side_val = point_side_of_line(wp, start, end)
+        if (side == 'left' and side_val <= 0) or (side == 'right' and side_val >= 0):
+            # 手动修正方向
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            length = sqrt(dx*dx + dy*dy)
+            if length > 1e-9:
+                if side == 'left':
+                    nx = -dy / length
+                    ny = dx / length
+                else:
+                    nx = dy / length
+                    ny = -dx / length
+                wp = (wp[0] + nx * safe_dist_km/111.0,
+                      wp[1] + ny * safe_dist_km/111.0)
+        # 验证绕行点是否与任何障碍物保持安全距离
         for obs2 in obstacles:
             if obs2.get('height', 50) >= flight_altitude:
-                poly2 = obs2['coordinates']
-                if point_to_polygon_min_distance(wp, poly2) * 1000 < safe_dist_m:
-                    wp = offset_point_away_from_polygon(wp, poly2, safe_dist_km)
+                if point_to_polygon_min_distance(wp, obs2['coordinates']) * 1000 < safe_dist_m:
+                    # 再次偏移
+                    wp = (wp[0] + (wp[0]-obs2['coordinates'][0][0]) * 0.5,
+                          wp[1] + (wp[1]-obs2['coordinates'][0][1]) * 0.5)
         left_segs, left_dist = find_path_with_side(start, wp, obstacles, flight_altitude, safe_dist_km, side, depth+1)
         right_segs, right_dist = find_path_with_side(wp, end, obstacles, flight_altitude, safe_dist_km, side, depth+1)
         return left_segs + right_segs, left_dist + right_dist
