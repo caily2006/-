@@ -14,8 +14,7 @@ import pytz
 import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
-from math import radians, sin, cos, sqrt, asin, pi, atan2, degrees, atan2
-import heapq
+from math import radians, sin, cos, sqrt, asin, pi, atan2, degrees
 
 # ==================== 配置 ====================
 AMAP_KEY = "0c475e7a50516001883c104383b43f31"
@@ -125,145 +124,236 @@ def get_polygon_center(polygon):
     lat_sum = sum(p[1] for p in polygon)
     return lng_sum/len(polygon), lat_sum/len(polygon)
 
-# ==================== 新避障算法：平移细化点并连接 ====================
-def sample_polygon_edge(p1, p2, max_distance_m):
-    """在两点之间插值，使相邻点距离不超过 max_distance_m（米）"""
-    dist_m = haversine(p1[0], p1[1], p2[0], p2[1]) * 1000
-    if dist_m <= max_distance_m:
-        return [p1, p2]
-    n = int(np.ceil(dist_m / max_distance_m))
-    points = []
-    for i in range(n+1):
-        t = i / n
-        x = p1[0] + t * (p2[0] - p1[0])
-        y = p1[1] + t * (p2[1] - p1[1])
-        points.append((x, y))
-    return points
-
-def refine_polygon(polygon, max_segment_m):
-    """将多边形所有边细化，返回点列表"""
-    points = []
-    for i in range(len(polygon)):
-        p1 = polygon[i]
-        p2 = polygon[(i+1) % len(polygon)]
-        seg_points = sample_polygon_edge(p1, p2, max_segment_m)
-        # 避免重复第一个点
-        if i == 0:
-            points.extend(seg_points)
-        else:
-            points.extend(seg_points[1:])
-    return points
-
-def offset_point_radial(point, center, distance_m):
-    """将点沿从中心向外的径向方向偏移 distance_m 米"""
-    dx = point[0] - center[0]
-    dy = point[1] - center[1]
+def get_normal_direction(polygon, point):
+    """获取多边形在给定点附近的外法线方向（近似）"""
+    cx, cy = get_polygon_center(polygon)
+    dx = point[0] - cx
+    dy = point[1] - cy
     length = sqrt(dx*dx + dy*dy)
     if length < 1e-9:
-        return point
-    delta_deg = distance_m / 111000.0
+        return (1.0, 0.0)
+    return (dx / length, dy / length)
+
+def push_point_away(polygon, point, safe_dist_m):
+    """将点沿远离多边形中心的方向推离 safe_dist_m 米"""
+    cx, cy = get_polygon_center(polygon)
+    dx = point[0] - cx
+    dy = point[1] - cy
+    length = sqrt(dx*dx + dy*dy)
+    if length < 1e-9:
+        return (point[0] + safe_dist_m/111000.0, point[1])
     ux = dx / length
     uy = dy / length
+    delta_deg = safe_dist_m / 111000.0
     return (point[0] + ux * delta_deg, point[1] + uy * delta_deg)
 
-def generate_safe_contour(obstacle, safe_dist_m, max_segment_m=10):
+# ==================== 核心避障算法：逐段推离 ====================
+def find_clear_path(start, end, obstacles, flight_altitude, safe_dist_m, max_iter=20):
     """
-    生成单个障碍物的安全轮廓：细化边界点并向外平移 safe_dist_m 米
-    返回平移后的点列表（按边界顺序）
+    从 start 向 end 移动，遇到障碍物时沿法线方向推离，反复迭代直到安全
     """
-    poly = obstacle['coordinates']
-    # 细化边界
-    refined = refine_polygon(poly, max_segment_m)
-    center = get_polygon_center(poly)
-    # 平移
-    expanded = [offset_point_radial(p, center, safe_dist_m) for p in refined]
-    return expanded
-
-def order_points_by_angle(points, reference, center):
-    """根据相对于中心点的极角排序点，并按到参考点的方向调整顺序，使得路径连续"""
-    if not points:
-        return []
-    # 计算每个点相对于中心点的角度
-    angles = []
-    for p in points:
-        dx = p[0] - center[0]
-        dy = p[1] - center[1]
-        ang = atan2(dy, dx)
-        angles.append(ang)
-    # 按角度排序
-    sorted_points = [p for _, p in sorted(zip(angles, points), key=lambda x: x[0])]
-    # 找到离参考点最近的点，旋转列表使该点作为起点
-    if reference is not None:
-        min_idx = 0
-        min_dist = float('inf')
-        for i, p in enumerate(sorted_points):
-            d = haversine(p[0], p[1], reference[0], reference[1])
-            if d < min_dist:
-                min_dist = d
-                min_idx = i
-        sorted_points = sorted_points[min_idx:] + sorted_points[:min_idx]
-    return sorted_points
-
-def build_avoidance_path(start, end, obstacles, flight_altitude, safe_dist_m, max_segment_m=10):
-    """
-    核心避障路径生成：
-    1. 收集所有需要避让的障碍物（高度>=飞行高度），对每个生成安全轮廓点集。
-    2. 将所有安全轮廓点合并，并添加起点和终点。
-    3. 将这些点按其在起点-终点连线方向上的投影排序，形成有序序列。
-    4. 依次连接成折线，即得到路径。
-    5. 检查路径是否与任何膨胀后的障碍物相交（理论上因为点来自膨胀轮廓，但可能连线穿过间隙，简单检查并微调）。
-    """
-    # 筛选障碍物
+    # 过滤高度相关的障碍物
     blocking_obs = [obs for obs in obstacles if obs.get('height', 50) >= flight_altitude]
     if not blocking_obs:
         return [(start, end)], True
 
-    # 生成所有安全轮廓点
-    all_points = []
-    for obs in blocking_obs:
-        contour = generate_safe_contour(obs, safe_dist_m, max_segment_m)
-        all_points.extend(contour)
+    # 检查线段是否安全（距离所有障碍物 >= safe_dist_m）
+    def segment_safe(p1, p2):
+        for obs in blocking_obs:
+            poly = obs['coordinates']
+            # 快速线段相交判断
+            if line_polygon_intersect(p1, p2, poly):
+                return False
+            # 检查距离
+            # 采样中点
+            mid = ((p1[0]+p2[0])/2, (p1[1]+p2[1])/2)
+            if point_to_polygon_min_distance(mid, poly) * 1000 < safe_dist_m:
+                return False
+            # 检查两端点
+            if point_to_polygon_min_distance(p1, poly) * 1000 < safe_dist_m:
+                return False
+            if point_to_polygon_min_distance(p2, poly) * 1000 < safe_dist_m:
+                return False
+        return True
 
-    if not all_points:
+    # 递归推离
+    def push_segment(p1, p2, depth=0):
+        if depth > max_iter:
+            return [(p1, p2)]  # 无法推离，返回直线（可能不安全）
+
+        if segment_safe(p1, p2):
+            return [(p1, p2)]
+
+        # 找到相交的障碍物
+        for obs in blocking_obs:
+            poly = obs['coordinates']
+            if not line_polygon_intersect(p1, p2, poly):
+                continue
+            # 计算线段与多边形边界的交点（近似）
+            # 采样点找到第一个在多边形内部的点
+            num_samples = 20
+            for i in range(num_samples+1):
+                t = i / num_samples
+                x = p1[0] + t * (p2[0] - p1[0])
+                y = p1[1] + t * (p2[1] - p1[1])
+                if point_in_polygon((x, y), poly):
+                    # 在该点附近推离
+                    push_dir = get_normal_direction(poly, (x, y))
+                    delta_deg = safe_dist_m / 111000.0
+                    new_x = x + push_dir[0] * delta_deg
+                    new_y = y + push_dir[1] * delta_deg
+                    new_point = (new_x, new_y)
+                    # 递归处理左右两段
+                    left = push_segment(p1, new_point, depth+1)
+                    right = push_segment(new_point, p2, depth+1)
+                    return left + right
+        # 无交点但仍不安全（距离不足），在中间点推离
+        mid = ((p1[0]+p2[0])/2, (p1[1]+p2[1])/2)
+        # 找到最近的障碍物
+        min_dist = float('inf')
+        closest_obs = None
+        for obs in blocking_obs:
+            poly = obs['coordinates']
+            dist = point_to_polygon_min_distance(mid, poly)
+            if dist < min_dist:
+                min_dist = dist
+                closest_obs = obs
+        if closest_obs:
+            push_dir = get_normal_direction(closest_obs['coordinates'], mid)
+            delta_deg = safe_dist_m / 111000.0
+            new_x = mid[0] + push_dir[0] * delta_deg
+            new_y = mid[1] + push_dir[1] * delta_deg
+            new_point = (new_x, new_y)
+            left = push_segment(p1, new_point, depth+1)
+            right = push_segment(new_point, p2, depth+1)
+            return left + right
+        return [(p1, p2)]
+
+    segments = push_segment(start, end)
+    # 检查最终路径是否安全（若仍不安全则返回直线并给出警告）
+    all_safe = True
+    for seg in segments:
+        if not segment_safe(seg[0], seg[1]):
+            all_safe = False
+            break
+    if not all_safe:
+        st.warning("无法完全避开障碍物，将使用直线（可能穿过障碍物）")
         return [(start, end)], False
-
-    # 计算起点到终点的方向角
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length = sqrt(dx*dx + dy*dy)
-    if length < 1e-9:
-        return [(start, end)], False
-    ux = dx / length
-    uy = dy / length
-
-    # 计算每个点在起点->终点方向上的投影值
-    proj_vals = []
-    for p in all_points:
-        # 投影长度
-        t = (p[0] - start[0])*ux + (p[1] - start[1])*uy
-        proj_vals.append((t, p))
-    proj_vals.sort(key=lambda x: x[0])
-    sorted_points = [p for _, p in proj_vals]
-
-    # 插入起点和终点
-    waypoints = [start] + sorted_points + [end]
-
-    # 简单去重（合并距离过近的点）
-    unique_waypoints = []
-    for wp in waypoints:
-        if not unique_waypoints or haversine(wp[0], wp[1], unique_waypoints[-1][0], unique_waypoints[-1][1]) > 1e-6:
-            unique_waypoints.append(wp)
-
-    # 转换为航段
-    segments = [(unique_waypoints[i], unique_waypoints[i+1]) for i in range(len(unique_waypoints)-1)]
-
-    # 验证路径是否与任何障碍物（原始）相交（安全距离已由膨胀保证，但连接的直线段可能穿过未膨胀区域？因为点来自膨胀边界，且线段连接两个边界点，理论上不会进入内部，但为保险进行快速检查并简单修复：若有相交则在线段中点插入安全点再试）
-    # 由于时间限制，此处不做过深纠错，相信平移后连接基本安全。
-    # 返回路径
     return segments, True
 
-# ... 剩余代码将在下一个消息中继续
-# ==================== 飞行监控模拟器（与之前相同） ====================
+def line_polygon_intersect(line_start, line_end, polygon):
+    """快速线段-多边形相交检测"""
+    for i in range(len(polygon)):
+        p1 = polygon[i]
+        p2 = polygon[(i+1) % len(polygon)]
+        if segments_intersect(line_start, line_end, p1, p2):
+            return True
+    if point_in_polygon(line_start, polygon) or point_in_polygon(line_end, polygon):
+        return True
+    return False
+
+# ==================== 曲线平滑 ====================
+def bezier_curve(points, num_points=50):
+    if len(points) < 2:
+        return points
+    smoothed = []
+    for i in range(len(points)-1):
+        p0 = points[i]
+        p3 = points[i+1]
+        if i == 0:
+            p1 = (p0[0] + (p3[0]-p0[0])*0.25, p0[1] + (p3[1]-p0[1])*0.25)
+        else:
+            p1 = (p0[0] + (p3[0]-points[i-1][0])*0.2, p0[1] + (p3[1]-points[i-1][1])*0.2)
+        if i == len(points)-2:
+            p2 = (p3[0] - (p3[0]-p0[0])*0.25, p3[1] - (p3[1]-p0[1])*0.25)
+        else:
+            p2 = (p3[0] - (points[i+2][0]-p0[0])*0.2, p3[1] - (points[i+2][1]-p0[1])*0.2)
+        for t in np.linspace(0, 1, num_points//(len(points)-1)):
+            x = (1-t)**3 * p0[0] + 3*(1-t)**2*t * p1[0] + 3*(1-t)*t**2 * p2[0] + t**3 * p3[0]
+            y = (1-t)**3 * p0[1] + 3*(1-t)**2*t * p1[1] + 3*(1-t)*t**2 * p2[1] + t**3 * p3[1]
+            smoothed.append((x, y))
+    smoothed.append(points[-1])
+    unique = []
+    for p in smoothed:
+        if not unique or haversine(p[0], p[1], unique[-1][0], unique[-1][1]) > 1e-6:
+            unique.append(p)
+    return unique
+
+# ==================== 垂直悬停点生成 ====================
+def get_perpendicular_hover_point(end_point, approach_dir, distance_m=10.0, side='right'):
+    ux, uy = approach_dir
+    if side == 'left':
+        nx = -uy
+        ny = ux
+    else:
+        nx = uy
+        ny = -ux
+    dist_deg = distance_m / 1000.0 / 111.0
+    lon = end_point[0] + nx * dist_deg
+    lat = end_point[1] + ny * dist_deg
+    candidate = (lon, lat)
+    actual_dist = haversine(end_point[0], end_point[1], candidate[0], candidate[1]) * 1000
+    if abs(actual_dist - distance_m) > 0.1:
+        scale = distance_m / actual_dist
+        lon = end_point[0] + nx * dist_deg * scale
+        lat = end_point[1] + ny * dist_deg * scale
+        candidate = (lon, lat)
+    return candidate
+
+def get_safe_hover_point(end_point, approach_dir, obstacles, flight_altitude, distance_m=10.0):
+    candidates = []
+    for side in ['left', 'right']:
+        pt = get_perpendicular_hover_point(end_point, approach_dir, distance_m, side)
+        safe = True
+        for obs in obstacles:
+            if obs.get('height', 50) >= flight_altitude:
+                if point_in_polygon(pt, obs['coordinates']):
+                    safe = False
+                    break
+        def point_to_segment_distance_approx(p, a, b):
+            x0,y0=p; x1,y1=a; x2,y2=b
+            dx=x2-x1; dy=y2-y1
+            if dx==0 and dy==0:
+                return haversine(x0,y0,x1,y1)
+            t = ((x0-x1)*dx + (y0-y1)*dy) / (dx*dx+dy*dy)
+            t = max(0, min(1, t))
+            proj_x = x1 + t*dx
+            proj_y = y1 + t*dy
+            return haversine(x0,y0,proj_x,proj_y)
+        line_start = (end_point[0] - approach_dir[0]*0.01, end_point[1] - approach_dir[1]*0.01)
+        line_end = end_point
+        d = point_to_segment_distance_approx(pt, line_start, line_end)
+        if d < 0.001:
+            safe = False
+        if safe:
+            candidates.append((pt, side))
+    if candidates:
+        return candidates[0][0], True
+    else:
+        back_pt = (end_point[0] - approach_dir[0] * distance_m/1000/111.0,
+                   end_point[1] - approach_dir[1] * distance_m/1000/111.0)
+        actual = haversine(end_point[0], end_point[1], back_pt[0], back_pt[1])*1000
+        if abs(actual - distance_m) > 0.1:
+            scale = distance_m / actual
+            back_pt = (end_point[0] - approach_dir[0] * distance_m/1000/111.0 * scale,
+                       end_point[1] - approach_dir[1] * distance_m/1000/111.0 * scale)
+        return back_pt, False
+
+def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km=0.01):
+    min_dist = float('inf')
+    nearest_obs = None
+    for obs in obstacles:
+        if obs.get('height', 50) >= flight_altitude:
+            poly = obs['coordinates']
+            dist = point_to_polygon_min_distance(destination, poly)
+            if dist < min_dist:
+                min_dist = dist
+                nearest_obs = obs.get('name', '未知障碍物')
+    if min_dist < safe_radius_km:
+        return False, min_dist, nearest_obs
+    return True, min_dist, None
+
+# ==================== 飞行监控模拟器 ====================
 class FlightSimulator:
     def __init__(self, waypoints, speed_mps=8.5):
         self.waypoints = waypoints
@@ -432,7 +522,7 @@ class DroneHeartbeatSimulator:
             'received_count': len(self.heartbeat_history)
         }
 
-# ==================== 辅助函数与障碍物管理 ====================
+# ==================== 辅助函数 ====================
 def get_beijing_time_info():
     now = datetime.datetime.now(BEIJING_TZ)
     return {
@@ -496,6 +586,7 @@ def create_heartbeat_charts(sequences, delays, receive_times, timeout_count, tim
     plt.tight_layout()
     return fig
 
+# ==================== 障碍物管理 ====================
 def load_obstacles():
     if os.path.exists(OBSTACLE_FILE):
         try:
@@ -551,107 +642,6 @@ def link_topology_html(delay_ms, loss_rate):
         </div>
     </div>
     """
-
-# ==================== 曲线平滑 ====================
-def bezier_curve(points, num_points=50):
-    if len(points) < 2:
-        return points
-    smoothed = []
-    for i in range(len(points)-1):
-        p0 = points[i]
-        p3 = points[i+1]
-        if i == 0:
-            p1 = (p0[0] + (p3[0]-p0[0])*0.25, p0[1] + (p3[1]-p0[1])*0.25)
-        else:
-            p1 = (p0[0] + (p3[0]-points[i-1][0])*0.2, p0[1] + (p3[1]-points[i-1][1])*0.2)
-        if i == len(points)-2:
-            p2 = (p3[0] - (p3[0]-p0[0])*0.25, p3[1] - (p3[1]-p0[1])*0.25)
-        else:
-            p2 = (p3[0] - (points[i+2][0]-p0[0])*0.2, p3[1] - (points[i+2][1]-p0[1])*0.2)
-        for t in np.linspace(0, 1, num_points//(len(points)-1)):
-            x = (1-t)**3 * p0[0] + 3*(1-t)**2*t * p1[0] + 3*(1-t)*t**2 * p2[0] + t**3 * p3[0]
-            y = (1-t)**3 * p0[1] + 3*(1-t)**2*t * p1[1] + 3*(1-t)*t**2 * p2[1] + t**3 * p3[1]
-            smoothed.append((x, y))
-    smoothed.append(points[-1])
-    unique = []
-    for p in smoothed:
-        if not unique or haversine(p[0], p[1], unique[-1][0], unique[-1][1]) > 1e-6:
-            unique.append(p)
-    return unique
-
-# ==================== 垂直悬停点生成 ====================
-def get_perpendicular_hover_point(end_point, approach_dir, distance_m=10.0, side='right'):
-    ux, uy = approach_dir
-    if side == 'left':
-        nx = -uy
-        ny = ux
-    else:
-        nx = uy
-        ny = -ux
-    dist_deg = distance_m / 1000.0 / 111.0
-    lon = end_point[0] + nx * dist_deg
-    lat = end_point[1] + ny * dist_deg
-    candidate = (lon, lat)
-    actual_dist = haversine(end_point[0], end_point[1], candidate[0], candidate[1]) * 1000
-    if abs(actual_dist - distance_m) > 0.1:
-        scale = distance_m / actual_dist
-        lon = end_point[0] + nx * dist_deg * scale
-        lat = end_point[1] + ny * dist_deg * scale
-        candidate = (lon, lat)
-    return candidate
-
-def get_safe_hover_point(end_point, approach_dir, obstacles, flight_altitude, distance_m=10.0):
-    candidates = []
-    for side in ['left', 'right']:
-        pt = get_perpendicular_hover_point(end_point, approach_dir, distance_m, side)
-        safe = True
-        for obs in obstacles:
-            if obs.get('height', 50) >= flight_altitude:
-                if point_in_polygon(pt, obs['coordinates']):
-                    safe = False
-                    break
-        def point_to_segment_distance_approx(p, a, b):
-            x0,y0=p; x1,y1=a; x2,y2=b
-            dx=x2-x1; dy=y2-y1
-            if dx==0 and dy==0:
-                return haversine(x0,y0,x1,y1)
-            t = ((x0-x1)*dx + (y0-y1)*dy) / (dx*dx+dy*dy)
-            t = max(0, min(1, t))
-            proj_x = x1 + t*dx
-            proj_y = y1 + t*dy
-            return haversine(x0,y0,proj_x,proj_y)
-        line_start = (end_point[0] - approach_dir[0]*0.01, end_point[1] - approach_dir[1]*0.01)
-        line_end = end_point
-        d = point_to_segment_distance_approx(pt, line_start, line_end)
-        if d < 0.001:
-            safe = False
-        if safe:
-            candidates.append((pt, side))
-    if candidates:
-        return candidates[0][0], True
-    else:
-        back_pt = (end_point[0] - approach_dir[0] * distance_m/1000/111.0,
-                   end_point[1] - approach_dir[1] * distance_m/1000/111.0)
-        actual = haversine(end_point[0], end_point[1], back_pt[0], back_pt[1])*1000
-        if abs(actual - distance_m) > 0.1:
-            scale = distance_m / actual
-            back_pt = (end_point[0] - approach_dir[0] * distance_m/1000/111.0 * scale,
-                       end_point[1] - approach_dir[1] * distance_m/1000/111.0 * scale)
-        return back_pt, False
-
-def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km=0.01):
-    min_dist = float('inf')
-    nearest_obs = None
-    for obs in obstacles:
-        if obs.get('height', 50) >= flight_altitude:
-            poly = obs['coordinates']
-            dist = point_to_polygon_min_distance(destination, poly)
-            if dist < min_dist:
-                min_dist = dist
-                nearest_obs = obs.get('name', '未知障碍物')
-    if min_dist < safe_radius_km:
-        return False, min_dist, nearest_obs
-    return True, min_dist, None
 
 # ==================== Streamlit 界面 ====================
 st.set_page_config(page_title="无人机监控与智能航线规划", layout="wide", page_icon="🚁")
@@ -981,9 +971,9 @@ elif st.session_state.page == "任务执行":
         time.sleep(0.5)
         st.rerun()
 
-# ==================== 页面3：航线规划（新算法） ====================
+# ==================== 页面3：航线规划（新推离算法） ====================
 elif st.session_state.page == "航线规划":
-    st.header("🗺️ 航线规划 · 边界平移避障（点云平移连接）")
+    st.header("🗺️ 航线规划 · 推离避障（保证不穿过障碍物）")
 
     left_col, right_col = st.columns([1, 2])
     with left_col:
@@ -1072,7 +1062,7 @@ elif st.session_state.page == "航线规划":
                 step=10
             )
             st.session_state.safe_distance = safe_distance_m / 1000.0
-            st.caption(f"当前安全半径: {safe_distance_m} 米，路径将沿障碍物边界外平移 {safe_distance_m} 米构成。")
+            st.caption(f"当前安全半径: {safe_distance_m} 米，路径将沿法线方向推离障碍物。")
             curve_smooth = st.checkbox("显示平滑曲线路径", value=st.session_state.curve_smooth)
             st.session_state.curve_smooth = curve_smooth
 
@@ -1100,7 +1090,7 @@ elif st.session_state.page == "航线规划":
             original_dist = haversine(start_point[0], start_point[1], end_point[0], end_point[1])
             if avoidance_enabled:
                 safe_dist_m = st.session_state.safe_distance * 1000
-                segments, is_safe = build_avoidance_path(start_point, end_point, st.session_state.obstacles, st.session_state.flight_altitude, safe_dist_m, max_segment_m=10)
+                segments, is_safe = find_clear_path(start_point, end_point, st.session_state.obstacles, st.session_state.flight_altitude, safe_dist_m)
             else:
                 segments = [(start_point, end_point)]
                 is_safe = True
@@ -1114,7 +1104,6 @@ elif st.session_state.page == "航线规划":
                 waypoints = [start_point, end_point]
             st.session_state.planned_waypoints = waypoints
 
-            # 显示安全状态
             if len(segments) == 1 and segments[0][0] == start_point and segments[0][1] == end_point:
                 if is_safe:
                     st.success("✅ 直线航线（无避障）")
@@ -1123,9 +1112,8 @@ elif st.session_state.page == "航线规划":
             else:
                 total_dist = sum(haversine(waypoints[i][0], waypoints[i][1], waypoints[i+1][0], waypoints[i+1][1]) for i in range(len(waypoints)-1))
                 extra = total_dist - original_dist
-                st.success(f"✨ 安全避障路径（边界平移法） | 总距离 {total_dist:.3f} km (+{extra:.3f} km)")
+                st.success(f"✨ 安全避障路径（推离法） | 总距离 {total_dist:.3f} km (+{extra:.3f} km)")
 
-            # 降落安全处理
             if landing_safety and st.session_state.b_point:
                 safe, dist_to_obs, obs_name = check_landing_safety(end_point, st.session_state.obstacles, st.session_state.flight_altitude, safe_radius_km=0.01)
                 if not safe and len(waypoints) > 1:
