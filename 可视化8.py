@@ -1307,4 +1307,4 @@ elif st.session_state.page == "坐标系设置":
 # ==================== 自动刷新（心跳） ====================
 if st.session_state.running:
     time.sleep(refresh_rate)
-    st.rerun)vvvv
+    st.rerun()
