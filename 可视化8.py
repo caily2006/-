@@ -15,6 +15,7 @@ import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
 from math import radians, sin, cos, sqrt, asin, pi, atan2, degrees
+import heapq
 
 # ==================== 配置 ====================
 AMAP_KEY = "0c475e7a50516001883c104383b43f31"
@@ -125,7 +126,7 @@ def get_polygon_center(polygon):
     return lng_sum/len(polygon), lat_sum/len(polygon)
 
 def expand_polygon(polygon, distance_m):
-    """向外扩展多边形"""
+    """向外扩展多边形 distance_m 米（简单中心扩展法）"""
     if len(polygon) < 3:
         return polygon
     cx, cy = get_polygon_center(polygon)
@@ -144,6 +145,7 @@ def expand_polygon(polygon, distance_m):
     return new_poly
 
 def segment_intersects_expanded_polygon(p1, p2, expanded_poly):
+    """检查线段是否与膨胀后的多边形相交（包含边界）"""
     if point_in_polygon(p1, expanded_poly) or point_in_polygon(p2, expanded_poly):
         return True
     for i in range(len(expanded_poly)):
@@ -153,106 +155,95 @@ def segment_intersects_expanded_polygon(p1, p2, expanded_poly):
             return True
     return False
 
-def find_safe_path(start, end, obstacles, flight_altitude, safe_dist_m):
-    """
-    简单可靠的绕行算法：
-    对于每个与直线相交的障碍物，在其左右两侧生成绕行点，
-    然后依次通过所有绕行点（总是选择累计距离较短的一侧）。
-    """
+# ==================== 基于膨胀多边形的避障算法 ====================
+def find_safe_path_expanded(start, end, obstacles, flight_altitude, safe_dist_m):
+    # 筛选需要避让的障碍物（高度足够）
     blocking_obs = [obs for obs in obstacles if obs.get('height', 50) >= flight_altitude]
     if not blocking_obs:
         return [(start, end)], True
 
-    # 生成所有障碍物的膨胀多边形（用于碰撞检测）
+    # 生成每个障碍物的膨胀多边形
     expanded_polys = []
     for obs in blocking_obs:
         poly = obs['coordinates']
         expanded = expand_polygon(poly, safe_dist_m)
         expanded_polys.append(expanded)
 
-    def segment_safe(p1, p2):
+    # 检查直线是否安全
+    def line_safe(p1, p2):
         for exp in expanded_polys:
             if segment_intersects_expanded_polygon(p1, p2, exp):
                 return False
         return True
 
-    # 如果直线安全，直接返回
-    if segment_safe(start, end):
+    if line_safe(start, end):
         return [(start, end)], True
 
-    # 计算从起点指向终点的方向向量
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length = sqrt(dx*dx + dy*dy)
-    if length < 1e-9:
-        return [(start, end)], True
-    ux = dx / length
-    uy = dy / length
-    # 垂直向量
-    perp_x = -uy
-    perp_y = ux
+    # 收集所有膨胀多边形的顶点作为节点
+    nodes = [start, end]
+    for exp in expanded_polys:
+        for v in exp:
+            nodes.append(v)
+    # 去重（基于距离）
+    unique_nodes = []
+    for p in nodes:
+        if not any(haversine(p[0], p[1], q[0], q[1]) < 1e-6 for q in unique_nodes):
+            unique_nodes.append(p)
+    nodes = unique_nodes
+    n = len(nodes)
 
-    # 为每个障碍物生成左右两个候选绕行点
-    waypoints = [start]
-    current = start
-    # 简单顺序处理：按距离起点的顺序排序障碍物（可选，但多数情况只有一个）
-    # 获取所有需要绕行的障碍物（与当前直线相交的）
-    # 这里为了简单，我们只处理第一个阻挡的障碍物，并生成两个候选点，然后从候选点再尝试连接至终点。
-    # 但为了实现多障碍物，我们采用递归思想：在生成的候选点处再次调用 find_safe_path。
-    # 为避免无限递归，我们直接生成一个额外的中间点就足够了。
-    
-    # 实际上，多数情况下用户只有一个障碍物，所以我们直接生成左右两个绕行点，并测试哪条路径安全且更短。
-    # 获取被阻挡的障碍物的膨胀多边形（取第一个）
-    # 找出所有与起点->终点线段相交的膨胀多边形中的第一个（或者计算所有交织，但简单取第一个）
-    # 为了找到哪个障碍物是最先遇到的，我们可以计算每个膨胀多边形中心到起点的距离，取最小的一个。
-    min_dist = float('inf')
-    first_obs_idx = 0
-    for i, exp in enumerate(expanded_polys):
-        center = get_polygon_center(exp)
-        d = haversine(center[0], center[1], start[0], start[1])
-        if d < min_dist:
-            min_dist = d
-            first_obs_idx = i
-    target_exp = expanded_polys[first_obs_idx]
-    # 找到该膨胀多边形上离直线最近的点，用来估算偏移
-    # 简单起见：使用膨胀多边形的中心
-    center_lon, center_lat = get_polygon_center(target_exp)
-    # 计算中心点在航线上的投影参数 t
-    t = ((center_lon - start[0]) * ux + (center_lat - start[1]) * uy) / length
-    t = max(0.2, min(0.8, t))  # 限制在航线中间区域
-    proj_lon = start[0] + ux * t * length
-    proj_lat = start[1] + uy * t * length
-    # 偏移距离（米转度）
-    offset_deg = safe_dist_m * 2.0 / 111000.0  # 使用2倍安全距离确保绕过
-    left_wp = (proj_lon + perp_x * offset_deg, proj_lat + perp_y * offset_deg)
-    right_wp = (proj_lon - perp_x * offset_deg, proj_lat - perp_y * offset_deg)
+    # 构建邻接表（可见性图）
+    adj = [[] for _ in range(n)]
+    for i in range(n):
+        for j in range(i+1, n):
+            p1 = nodes[i]
+            p2 = nodes[j]
+            if line_safe(p1, p2):
+                w = haversine(p1[0], p1[1], p2[0], p2[1])
+                adj[i].append((j, w))
+                adj[j].append((i, w))
 
-    # 检查左右绕行点是否被障碍物覆盖
-    def point_in_any_expanded(pt):
-        for exp in expanded_polys:
-            if point_in_polygon(pt, exp):
-                return True
-        return False
+    # 找到起点和终点的索引
+    try:
+        start_idx = nodes.index(start)
+        end_idx = nodes.index(end)
+    except ValueError:
+        # 理论上不会发生
+        return [(start, end)], False
 
-    if point_in_any_expanded(left_wp):
-        left_wp = (proj_lon + perp_x * offset_deg * 2, proj_lat + perp_y * offset_deg * 2)
-    if point_in_any_expanded(right_wp):
-        right_wp = (proj_lon - perp_x * offset_deg * 2, proj_lat - perp_y * offset_deg * 2)
+    # Dijkstra 求最短路径
+    dist = [float('inf')] * n
+    prev = [-1] * n
+    dist[start_idx] = 0
+    pq = [(0, start_idx)]
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist[u]:
+            continue
+        if u == end_idx:
+            break
+        for v, w in adj[u]:
+            if dist[u] + w < dist[v]:
+                dist[v] = dist[u] + w
+                prev[v] = u
+                heapq.heappush(pq, (dist[v], v))
 
-    # 尝试左绕行和右绕行，选择总距离短的
-    # 递归计算从 left_wp 到终点的安全路径（注意可能再次遇到障碍物）
-    left_path1, _ = find_safe_path(start, left_wp, obstacles, flight_altitude, safe_dist_m)
-    left_path2, _ = find_safe_path(left_wp, end, obstacles, flight_altitude, safe_dist_m)
-    left_total = sum(haversine(seg[0][0], seg[0][1], seg[1][0], seg[1][1]) for seg in left_path1 + left_path2)
+    if dist[end_idx] == float('inf'):
+        # 找不到路径，使用直线并警告
+        st.warning("无法找到安全路径，将使用直线（可能穿过障碍物）")
+        return [(start, end)], False
 
-    right_path1, _ = find_safe_path(start, right_wp, obstacles, flight_altitude, safe_dist_m)
-    right_path2, _ = find_safe_path(right_wp, end, obstacles, flight_altitude, safe_dist_m)
-    right_total = sum(haversine(seg[0][0], seg[0][1], seg[1][0], seg[1][1]) for seg in right_path1 + right_path2)
+    # 重建路径
+    path = []
+    cur = end_idx
+    while cur != -1:
+        path.append(nodes[cur])
+        cur = prev[cur]
+    path.reverse()
 
-    if left_total < right_total:
-        return left_path1 + left_path2, True
-    else:
-        return right_path1 + right_path2, True
+    # 转换为航段
+    segments = [(path[i], path[i+1]) for i in range(len(path)-1)]
+    return segments, True
 
 # ==================== 曲线平滑 ====================
 def bezier_curve(points, num_points=50):
@@ -973,9 +964,9 @@ elif st.session_state.page == "任务执行":
         time.sleep(0.5)
         st.rerun()
 
-# ==================== 页面3：航线规划（新绕行算法） ====================
+# ==================== 页面3：航线规划（使用新的膨胀算法） ====================
 elif st.session_state.page == "航线规划":
-    st.header("🗺️ 航线规划 · 可靠绕行（保证避开障碍物）")
+    st.header("🗺️ 航线规划 · 膨胀安全避障（保证安全距离）")
 
     left_col, right_col = st.columns([1, 2])
     with left_col:
@@ -1092,7 +1083,7 @@ elif st.session_state.page == "航线规划":
             original_dist = haversine(start_point[0], start_point[1], end_point[0], end_point[1])
             if avoidance_enabled:
                 safe_dist_m = st.session_state.safe_distance * 1000
-                segments, is_safe = find_safe_path(start_point, end_point, st.session_state.obstacles, st.session_state.flight_altitude, safe_dist_m)
+                segments, is_safe = find_safe_path_expanded(start_point, end_point, st.session_state.obstacles, st.session_state.flight_altitude, safe_dist_m)
             else:
                 segments = [(start_point, end_point)]
                 is_safe = True
@@ -1106,16 +1097,16 @@ elif st.session_state.page == "航线规划":
                 waypoints = [start_point, end_point]
             st.session_state.planned_waypoints = waypoints
 
-            # 显示安全状态（简化 ：只要不是单一直线，即认为是绕行）
-            if len(waypoints) > 2 or (len(waypoints) == 2 and not (waypoints[0]==start_point and waypoints[1]==end_point)):
-                total_dist = sum(haversine(waypoints[i][0], waypoints[i][1], waypoints[i+1][0], waypoints[i+1][1]) for i in range(len(waypoints)-1))
-                extra = total_dist - original_dist
-                st.success(f"✨ 安全避障路径 | 总距离 {total_dist:.3f} km (+{extra:.3f} km)")
-            else:
+            # 显示安全状态
+            if len(segments) == 1 and segments[0][0] == start_point and segments[0][1] == end_point:
                 if is_safe:
                     st.success("✅ 直线航线（无避障）")
                 else:
                     st.error("⚠️ 无法找到安全路径，当前显示为直线（可能穿过障碍物）")
+            else:
+                total_dist = sum(haversine(waypoints[i][0], waypoints[i][1], waypoints[i+1][0], waypoints[i+1][1]) for i in range(len(waypoints)-1))
+                extra = total_dist - original_dist
+                st.success(f"✨ 安全避障路径 | 总距离 {total_dist:.3f} km (+{extra:.3f} km)")
 
             # 降落安全处理
             if landing_safety and st.session_state.b_point:
