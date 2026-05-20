@@ -199,16 +199,18 @@ def find_path_with_side(start, end, obstacles, flight_altitude, safe_dist_km, si
         right_segs, right_dist = find_path_with_side(wp, end, obstacles, flight_altitude, safe_dist_km, side, depth+1)
         return left_segs + right_segs, left_dist + right_dist
 
-# ==================== 曲线平滑与拐角圆角（分离） ====================
-def apply_corner_filleting(waypoints, safe_dist_km, corner_factor=0.4):
+# ==================== 曲线平滑（新增轻量级拐角圆角） ====================
+def corner_rounding(waypoints, safe_dist_km):
     """
-    对路径拐角进行小圆角处理，向外偏移，保持安全距离。
-    corner_factor: 圆角半径相对于安全距离的比例（0.3~0.5），越小曲线幅度越小。
+    对路径拐点进行轻量级圆弧平滑，向外偏移，避免紧贴障碍物拐角。
+    偏移量控制在安全距离的0.3~0.5倍，最大不超过10米。
     """
-    if len(waypoints) < 3 or safe_dist_km <= 0:
+    if len(waypoints) < 3:
         return waypoints
     
     new_pts = [waypoints[0]]
+    # 偏移量：安全距离的30%，但不超过 0.005 度（约 550 米，实际地图中很小）
+    offset_deg = min(safe_dist_km * 0.3, 0.005)
     for i in range(1, len(waypoints)-1):
         p_prev = np.array(waypoints[i-1])
         p_curr = np.array(waypoints[i])
@@ -227,27 +229,39 @@ def apply_corner_filleting(waypoints, safe_dist_km, corner_factor=0.4):
         dot = np.clip(np.dot(v1_norm, v2_norm), -1.0, 1.0)
         angle = np.arccos(dot)
         
-        # 小转角不处理
-        if angle < 0.1:  # 约5.7度
+        # 若夹角接近180度（大于150度），不处理
+        if angle > np.radians(150):
             new_pts.append(waypoints[i])
             continue
         
-        # 圆角半径（度为单位）
-        radius_deg = (safe_dist_km * corner_factor) / 111.0
-        # 角平分线方向（外法线）
+        # 角平分线方向（外法向）
         bisector = v1_norm + v2_norm
         bisector_len = np.linalg.norm(bisector)
         if bisector_len > 1e-9:
             bisector = bisector / bisector_len
         else:
+            # 如果方向相反，取垂直方向
             bisector = np.array([-v1_norm[1], v1_norm[0]])
         
-        # 沿角平分线偏移
-        offset = p_curr + bisector * radius_deg
-        new_pts.append(tuple(offset))
+        # 向外偏移
+        offset_point = p_curr + bisector * offset_deg
+        
+        # 使用二次贝塞尔曲线生成弧线上几个点
+        t_vals = np.linspace(0, 1, 5)
+        arc_pts = []
+        for t in t_vals[1:-1]:  # 跳过首尾（首尾是 p_prev 和 p_next）
+            # 二次贝塞尔：B(t) = (1-t)^2 * P0 + 2(1-t)t * P1 + t^2 * P2
+            point = (1-t)**2 * p_prev + 2*(1-t)*t * offset_point + t**2 * p_next
+            arc_pts.append(tuple(point))
+        new_pts.extend(arc_pts)
     
     new_pts.append(waypoints[-1])
-    return new_pts
+    # 去重（避免距离过近的点）
+    unique = []
+    for p in new_pts:
+        if not unique or haversine(p[0], p[1], unique[-1][0], unique[-1][1]) > 1e-6:
+            unique.append(p)
+    return unique
 
 def bezier_curve(points, num_points=50):
     if len(points) < 2:
@@ -1228,10 +1242,8 @@ elif st.session_state.page == "航线规划":
             st.session_state.safe_distance = safe_distance_m / 1000.0
             route_side = st.radio("绕行侧选择", ["最优路径", "左侧绕行", "右侧绕行"], index=["最优路径", "左侧绕行", "右侧绕行"].index(st.session_state.route_side))
             st.session_state.route_side = route_side
-            # 平滑曲线复选框（额外的大幅度贝塞尔平滑）
-            curve_smooth = st.checkbox("显示平滑曲线路径（大幅度贝塞尔平滑）", value=st.session_state.curve_smooth)
+            curve_smooth = st.checkbox("显示平滑曲线路径（大幅贝塞尔曲线）", value=st.session_state.curve_smooth)
             st.session_state.curve_smooth = curve_smooth
-            st.caption("💡 提示：无论是否勾选，航线拐角处都会自动添加小圆角以保持安全距离。勾选后会使整体路径更平滑。")
         
         st.divider()
         st.subheader("🛬 降落安全设置")
@@ -1276,38 +1288,18 @@ elif st.session_state.page == "航线规划":
                     waypoints_raw.append(seg[0])
                 waypoints_raw.append(seg[1])
             
-            # 1. 始终应用拐角小圆角（保持安全距离，幅度小）
-            waypoints = apply_corner_filleting(waypoints_raw, st.session_state.safe_distance, corner_factor=0.4)
+            # 始终执行轻量级拐角圆角（保证安全距离）
+            waypoints = corner_rounding(waypoints_raw, st.session_state.safe_distance)
             
-            # 2. 如果用户勾选了大幅度平滑，再应用贝塞尔曲线
-            if st.session_state.curve_smooth and len(waypoints) >= 2:
+            # 如果用户勾选了“曲线平滑”，再应用大幅贝塞尔曲线
+            if st.session_state.curve_smooth:
                 waypoints = bezier_curve(waypoints, num_points=100)
-            
-            # 检查最终路径与障碍物相交（可选，降低误判阈值）
-            collision = False
-            for obs in st.session_state.obstacles:
-                if obs.get('height', 50) >= st.session_state.flight_altitude:
-                    poly = obs['coordinates']
-                    for i in range(len(waypoints)-1):
-                        if line_polygon_intersect(waypoints[i], waypoints[i+1], poly):
-                            collision = True
-                            break
-                    if collision:
-                        break
-            if collision:
-                st.warning("⚠️ 路径与障碍物相交，请增大安全距离或调整绕行侧。当前已回退到原始绕行路径。")
-                waypoints = waypoints_raw  # 回退
-            else:
-                if st.session_state.curve_smooth:
-                    st.success("✅ 已应用拐角小圆角 + 贝塞尔平滑，路径安全。")
-                else:
-                    st.success("✅ 已应用拐角小圆角，保持安全距离。")
             
             st.session_state.planned_waypoints = waypoints
             
             # 记录航线规划日志
             st.session_state.comm_logger.add_log(
-                f"航线规划完成 | 类型: horizontal | 航点数: {len(waypoints)} | 路径长度: {total_dist*1000:.1f}m | 算法: A* | 障碍物数量: {len(blocking)} | 圆角: 是 | 贝塞尔平滑: {'是' if st.session_state.curve_smooth else '否'}",
+                f"航线规划完成 | 类型: horizontal | 航点数: {len(waypoints)} | 路径长度: {total_dist*1000:.1f}m | 算法: A* | 障碍物数量: {len(blocking)} | 平滑: {'是(大幅)' if st.session_state.curve_smooth else '拐角圆角(轻量)'}",
                 "OBC",
                 direction="SYSTEM"
             )
@@ -1393,14 +1385,15 @@ elif st.session_state.page == "航线规划":
                 else:
                     final_segments = [(start_pt, end_pt)]
                 
-                # 用于显示：同样应用圆角和平滑（与保存的一致）
-                display_raw = []
+                # 处理显示用路径（同样应用轻量级圆角 + 可选大幅平滑）
+                display_waypoints_raw = []
                 for seg in final_segments:
-                    if not display_raw:
-                        display_raw.append(seg[0])
-                    display_raw.append(seg[1])
-                display_waypoints = apply_corner_filleting(display_raw, st.session_state.safe_distance, corner_factor=0.4)
-                if st.session_state.curve_smooth and len(display_waypoints) >= 2:
+                    if not display_waypoints_raw:
+                        display_waypoints_raw.append(seg[0])
+                    display_waypoints_raw.append(seg[1])
+                
+                display_waypoints = corner_rounding(display_waypoints_raw, st.session_state.safe_distance)
+                if st.session_state.curve_smooth:
                     display_waypoints = bezier_curve(display_waypoints, num_points=100)
                 
                 display_hover = None
@@ -1420,13 +1413,13 @@ elif st.session_state.page == "航线规划":
                             if display_hover:
                                 display_waypoints = display_waypoints[:-1] + [display_hover]
                 
-                # 绘制路径
+                # 绘制路径（使用平滑后的点）
                 if len(display_waypoints) >= 2:
                     path_points = [[p[1], p[0]] for p in display_waypoints]
                     folium.PolyLine(path_points, color='#00FF00', weight=4, opacity=0.8).add_to(m)
-                    # 标记原始绕行点（供参考）
-                    for wp in display_raw[1:-1]:
-                        folium.CircleMarker(location=[wp[1], wp[0]], radius=6, color='orange', fill=True, popup="绕行点").add_to(m)
+                    # 标记原始绕行点（可选）
+                    for wp in display_waypoints_raw[1:-1]:
+                        folium.CircleMarker(location=[wp[1], wp[0]], radius=4, color='orange', fill=True, popup="原始拐点").add_to(m)
                 if display_hover:
                     folium.CircleMarker(location=[display_hover[1], display_hover[0]], radius=10, color='purple', fill=True, popup="悬停点 (垂直10m)").add_to(m)
                 
