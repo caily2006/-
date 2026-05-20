@@ -672,6 +672,9 @@ if "planned_waypoints" not in st.session_state:
 # 新增：电池终点剩余电量百分比（默认80%，消耗缓慢）
 if "battery_reserve_percent" not in st.session_state:
     st.session_state.battery_reserve_percent = 80
+# 新增：地图刷新间隔（毫秒）
+if "map_refresh_interval_ms" not in st.session_state:
+    st.session_state.map_refresh_interval_ms = 200
 
 st.title("🚁 无人机实时监控与智能航线规划系统")
 st.markdown('<span class="beijing-badge">🇨🇳 北京时间 (UTC+8)</span>', unsafe_allow_html=True)
@@ -722,7 +725,7 @@ with st.sidebar:
     st.metric("🚁 巡航高度", f"{st.session_state.flight_altitude:.0f} m")
     st.divider()
     st.subheader("⚡ 刷新设置")
-    refresh_rate = st.selectbox("刷新频率（秒）", [1, 2, 3, 5], index=0)
+    refresh_rate = st.selectbox("心跳刷新频率（秒）", [1, 2, 3, 5], index=0)
     st.divider()
     st.subheader("🧭 功能页面")
     page = st.radio("跳转", ["心跳监控", "任务执行", "航线规划", "障碍物管理", "坐标系设置"], 
@@ -806,9 +809,14 @@ if st.session_state.page == "心跳监控":
             st.pyplot(fig2)
             plt.close(fig2)
 
-# ==================== 页面2：任务执行（含通信链路拓扑 + 可调电量消耗） ====================
+# ==================== 页面2：任务执行（可调地图刷新间隔） ====================
 elif st.session_state.page == "任务执行":
     st.header("✈️ 飞行实时画面 - 任务执行监控")
+    
+    # 刷新间隔调节滑块
+    refresh_ms = st.slider("🖼️ 地图刷新间隔（毫秒）", min_value=50, max_value=500, value=st.session_state.map_refresh_interval_ms, step=10,
+                           help="间隔越小，画面越流畅，但会增加CPU负载。建议200ms。")
+    st.session_state.map_refresh_interval_ms = refresh_ms
     
     # 允许用户调节电池终点剩余电量（仅在飞行未运行时生效）
     col_reserve1, col_reserve2 = st.columns([1, 3])
@@ -965,9 +973,9 @@ elif st.session_state.page == "任务执行":
         st.markdown(link_topology_html(delay, loss), unsafe_allow_html=True)
         st.caption("数据来自实时心跳模拟")
     
-    # 自动刷新（使地图动态跟随）
+    # 自动刷新（使用用户设定的毫秒间隔）
     if sim.is_running:
-        time.sleep(0.5)
+        time.sleep(st.session_state.map_refresh_interval_ms / 1000.0)
         st.rerun()
 
 # ==================== 页面3：航线规划 ====================
