@@ -300,20 +300,43 @@ def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km
         return False, min_dist, nearest_obs
     return True, min_dist, None
 
-# ==================== 通信日志管理器 ====================
+# ==================== 通信日志管理器（支持方向筛选） ====================
 class CommunicationLogger:
     def __init__(self, maxlen=100):
         self.logs = deque(maxlen=maxlen)
     
-    def add_log(self, message, source="SYSTEM"):
+    def add_log(self, message, source="SYSTEM", direction=None):
+        """
+        direction 可选值: 'GCS->OBC->FCU', 'FCU->OBC->GCS', 'SYSTEM'
+        如果不指定，根据 message 内容自动判断
+        """
         timestamp = datetime.datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
-        self.logs.append(f"[{timestamp}] {message}")
+        if direction is None:
+            # 自动判断方向
+            if "GCS→OBC→FCU" in message or "GCS->OBC->FCU" in message:
+                direction = "GCS->OBC->FCU"
+            elif "FCU→OBC→GCS" in message or "FCU->OBC->GCS" in message:
+                direction = "FCU->OBC->GCS"
+            else:
+                direction = "SYSTEM"
+        self.logs.append({
+            'timestamp': timestamp,
+            'message': message,
+            'direction': direction,
+            'source': source
+        })
     
-    def get_logs(self, reverse=True):
+    def get_logs(self, direction_filter=None, reverse=True):
+        """
+        direction_filter: None 表示全部, 或 'GCS->OBC->FCU', 'FCU->OBC->GCS', 'SYSTEM'
+        """
         logs_list = list(self.logs)
+        if direction_filter is not None:
+            logs_list = [log for log in logs_list if log['direction'] == direction_filter]
+        formatted = [f"[{log['timestamp']}] {log['message']}" for log in logs_list]
         if reverse:
-            logs_list.reverse()
-        return logs_list
+            formatted.reverse()
+        return formatted
     
     def clear(self):
         self.logs.clear()
@@ -362,8 +385,8 @@ class FlightSimulator:
             self.last_logged_wp_index = 0
             self._mission_complete_logged = False
             if self.logger:
-                self.logger.add_log("GCS→OBC→FCU: ARM | Mode: AUTO", "GCS")
-                self.logger.add_log("FCU→OBC→GCS: ACK | Mode: AUTO", "FCU")
+                self.logger.add_log("GCS→OBC→FCU: ARM | Mode: AUTO", "GCS", direction="GCS->OBC->FCU")
+                self.logger.add_log("FCU→OBC→GCS: ACK | Mode: AUTO", "FCU", direction="FCU->OBC->GCS")
 
     def pause(self):
         if self.is_running and not self.is_paused:
@@ -371,7 +394,7 @@ class FlightSimulator:
             self.is_paused = True
             self.is_running = False
             if self.logger:
-                self.logger.add_log("GCS→OBC→FCU: PAUSE", "GCS")
+                self.logger.add_log("GCS→OBC→FCU: PAUSE", "GCS", direction="GCS->OBC->FCU")
 
     def resume(self):
         if not self.is_running and self.is_paused:
@@ -380,7 +403,7 @@ class FlightSimulator:
             self.is_paused = False
             self.is_running = True
             if self.logger:
-                self.logger.add_log("GCS→OBC→FCU: RESUME", "GCS")
+                self.logger.add_log("GCS→OBC→FCU: RESUME", "GCS", direction="GCS->OBC->FCU")
 
     def stop(self):
         self.is_running = False
@@ -393,7 +416,7 @@ class FlightSimulator:
         self.current_pos = self.waypoints[0] if self.waypoints else None
         self.battery_percent = 100.0
         if self.logger:
-            self.logger.add_log("GCS→OBC→FCU: STOP", "GCS")
+            self.logger.add_log("GCS→OBC→FCU: STOP", "GCS", direction="GCS->OBC->FCU")
         self.last_logged_wp_index = 0
         self._mission_complete_logged = False
 
@@ -411,7 +434,7 @@ class FlightSimulator:
             self.is_running = False
             self.start_abs_time = None
             if self.logger and not self._mission_complete_logged:
-                self.logger.add_log("FCU→OBC→GCS: MISSION_COMPLETE", "FCU")
+                self.logger.add_log("FCU→OBC→GCS: MISSION_COMPLETE", "FCU", direction="FCU->OBC->GCS")
                 self._mission_complete_logged = True
         else:
             dist_accum = 0.0
@@ -431,7 +454,7 @@ class FlightSimulator:
         if self.current_index > self.last_logged_wp_index:
             for wp_idx in range(self.last_logged_wp_index + 1, self.current_index + 1):
                 if self.logger:
-                    self.logger.add_log(f"FCU→OBC→GCS: WP_REACHED #{wp_idx}", "FCU")
+                    self.logger.add_log(f"FCU→OBC→GCS: WP_REACHED #{wp_idx}", "FCU", direction="FCU->OBC->GCS")
             self.last_logged_wp_index = self.current_index
         # 电量模拟
         progress = self.dist_traveled / self.total_distance if self.total_distance > 0 else 1
@@ -481,7 +504,7 @@ class DroneHeartbeatSimulator:
         current_time = time.time()
         if current_time - self.last_received_time > self.timeout_seconds:
             if not self.timeout_flag and self.logger:
-                self.logger.add_log("⚠️ 心跳超时: GCS↔OBC 链路中断", "SYS")
+                self.logger.add_log("⚠️ 心跳超时: GCS↔OBC 链路中断", "SYS", direction="SYSTEM")
                 self.timeout_flag = True
             if current_time - self.last_timeout_time > 1:
                 self.timeout_events.append({
@@ -491,7 +514,7 @@ class DroneHeartbeatSimulator:
                 self.last_timeout_time = current_time
         else:
             if self.timeout_flag and self.logger:
-                self.logger.add_log("✅ 心跳恢复: GCS↔OBC 链路正常", "SYS")
+                self.logger.add_log("✅ 心跳恢复: GCS↔OBC 链路正常", "SYS", direction="SYSTEM")
                 self.timeout_flag = False
     
     def get_recent_data(self, window_size=30):
@@ -668,7 +691,7 @@ st.markdown("""
 
 # 初始化 session_state
 if "simulator" not in st.session_state:
-    st.session_state.simulator = None   # 心跳模拟器将在后面创建
+    st.session_state.simulator = None
 if "running" not in st.session_state:
     st.session_state.running = False
 if "last_update" not in st.session_state:
@@ -712,7 +735,7 @@ if "map_refresh_interval_ms" not in st.session_state:
 if "comm_logger" not in st.session_state:
     st.session_state.comm_logger = CommunicationLogger(maxlen=100)
 
-# 创建心跳模拟器（必须传入 logger）
+# 创建心跳模拟器
 if st.session_state.simulator is None:
     st.session_state.simulator = DroneHeartbeatSimulator(timeout_seconds=3, logger=st.session_state.comm_logger)
 
@@ -1051,7 +1074,21 @@ elif st.session_state.page == "任务执行":
         st.markdown(link_topology_html(delay, loss), unsafe_allow_html=True)
         
         st.subheader("📜 通信日志")
-        logs = st.session_state.comm_logger.get_logs(reverse=True)
+        # 方向选择控件
+        log_direction = st.radio(
+            "业务流程方向",
+            ["全部", "GCS→OBC→FCU", "FCU→OBC→GCS", "系统消息"],
+            horizontal=True,
+            key="log_direction_filter"
+        )
+        dir_map = {
+            "全部": None,
+            "GCS→OBC→FCU": "GCS->OBC->FCU",
+            "FCU→OBC→GCS": "FCU->OBC->GCS",
+            "系统消息": "SYSTEM"
+        }
+        filter_val = dir_map[log_direction]
+        logs = st.session_state.comm_logger.get_logs(direction_filter=filter_val, reverse=True)
         log_text = "\n".join(logs) if logs else "暂无通信日志"
         st.text_area("", log_text, height=400, label_visibility="collapsed")
         if st.button("清空日志", key="clear_logs"):
@@ -1203,7 +1240,8 @@ elif st.session_state.page == "航线规划":
             # 记录航线规划日志
             st.session_state.comm_logger.add_log(
                 f"航线规划完成 | 类型: horizontal | 航点数: {len(waypoints)} | 路径长度: {total_dist*1000:.1f}m | 算法: A* | 障碍物数量: {len(blocking)}",
-                "OBC"
+                "OBC",
+                direction="SYSTEM"
             )
             
             hover_point = None
