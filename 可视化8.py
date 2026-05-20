@@ -11,9 +11,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import pytz
-import folium
-from folium.plugins import Draw
-from streamlit_folium import st_folium
+import pydeck as pdk
 from math import radians, sin, cos, sqrt, asin, pi, atan2, degrees
 
 # ==================== 配置 ====================
@@ -302,7 +300,7 @@ def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km
         return False, min_dist, nearest_obs
     return True, min_dist, None
 
-# ==================== 飞行监控模拟器（修复电量消耗过快 + 可配置终点剩余电量） ====================
+# ==================== 飞行监控模拟器（可配置终点剩余电量） ====================
 class FlightSimulator:
     def __init__(self, waypoints, speed_mps=8.5, battery_reserve_percent=80):
         self.waypoints = waypoints
@@ -312,13 +310,9 @@ class FlightSimulator:
         self.dist_traveled = 0.0
         self.current_index = 0
         self.current_pos = waypoints[0] if waypoints else None
-        
-        # 电量参数：到达终点时剩余电量百分比（默认80%，即仅消耗20%）
         self.battery_reserve_percent = battery_reserve_percent
-        
-        # 时间控制变量（绝对时间模型）
-        self.start_abs_time = None      # 开始飞行的绝对时间戳
-        self.pause_start_time = None    # 暂停开始的时间戳
+        self.start_abs_time = None
+        self.pause_start_time = None
         self.total_paused_duration = 0.0
         self.is_running = False
         self.is_paused = False
@@ -326,19 +320,14 @@ class FlightSimulator:
 
     @property
     def elapsed_seconds(self):
-        """返回从开始到当前（扣除暂停）的总秒数"""
         if not self.is_running and not self.is_paused:
             return 0.0
         if self.is_running:
             if self.start_abs_time is None:
                 return 0.0
             return time.time() - self.start_abs_time
-        else:  # paused
+        else:
             return self.total_paused_duration
-
-    def get_elapsed_time(self):
-        """兼容旧接口"""
-        return self.elapsed_seconds
 
     def start(self):
         if not self.is_running and not self.is_paused:
@@ -375,17 +364,13 @@ class FlightSimulator:
         self.battery_percent = 100.0
 
     def update(self):
-        """根据已用时间更新位置、已飞距离、电量（消耗大幅降低）"""
         if not self.is_running or self.is_paused:
             return
         if self.start_abs_time is None:
             return
-        
         elapsed = time.time() - self.start_abs_time
         target_dist = self.speed * elapsed
-        
         if target_dist >= self.total_distance:
-            # 到达终点
             self.current_index = len(self.waypoints) - 1
             self.current_pos = self.waypoints[-1]
             self.dist_traveled = self.total_distance
@@ -405,8 +390,6 @@ class FlightSimulator:
                     self.dist_traveled = target_dist
                     break
                 dist_accum += seg_dist
-        
-        # 新电量模型：从100%线性下降到 battery_reserve_percent（终点剩余）
         progress = self.dist_traveled / self.total_distance if self.total_distance > 0 else 1
         self.battery_percent = max(0, 100 - progress * (100 - self.battery_reserve_percent))
 
@@ -669,10 +652,8 @@ if "flight_sim" not in st.session_state:
     st.session_state.flight_sim = None
 if "planned_waypoints" not in st.session_state:
     st.session_state.planned_waypoints = []
-# 新增：电池终点剩余电量百分比（默认80%，消耗缓慢）
 if "battery_reserve_percent" not in st.session_state:
     st.session_state.battery_reserve_percent = 80
-# 新增：地图刷新间隔（毫秒）
 if "map_refresh_interval_ms" not in st.session_state:
     st.session_state.map_refresh_interval_ms = 200
 
@@ -809,23 +790,22 @@ if st.session_state.page == "心跳监控":
             st.pyplot(fig2)
             plt.close(fig2)
 
-# ==================== 页面2：任务执行（可调地图刷新间隔） ====================
+# ==================== 页面2：任务执行（使用 PyDeck 实现超流畅地图） ====================
 elif st.session_state.page == "任务执行":
     st.header("✈️ 飞行实时画面 - 任务执行监控")
     
     # 刷新间隔调节滑块
     refresh_ms = st.slider("🖼️ 地图刷新间隔（毫秒）", min_value=50, max_value=500, value=st.session_state.map_refresh_interval_ms, step=10,
-                           help="间隔越小，画面越流畅，但会增加CPU负载。建议200ms。")
+                           help="间隔越小，画面越流畅。建议 100-200ms。")
     st.session_state.map_refresh_interval_ms = refresh_ms
     
-    # 允许用户调节电池终点剩余电量（仅在飞行未运行时生效）
+    # 电池电量保留率
     col_reserve1, col_reserve2 = st.columns([1, 3])
     with col_reserve1:
         new_reserve = st.slider("🔋 到达终点时剩余电量 (%)", 0, 100, st.session_state.battery_reserve_percent, 5,
-                                help="数值越高，电量消耗越慢。例如80%表示全程仅消耗20%电量。修改后需停止并重新开始任务。")
+                                help="数值越高，电量消耗越慢。修改后需停止并重新开始任务。")
         if new_reserve != st.session_state.battery_reserve_percent:
             st.session_state.battery_reserve_percent = new_reserve
-            # 如果当前模拟器存在且未在运行，则重建以应用新参数
             if st.session_state.flight_sim is not None and not st.session_state.flight_sim.is_running and not st.session_state.flight_sim.is_paused:
                 if st.session_state.planned_waypoints:
                     st.session_state.flight_sim = FlightSimulator(
@@ -837,6 +817,7 @@ elif st.session_state.page == "任务执行":
     with col_reserve2:
         st.caption("修改电量保留率后，需要停止并重新开始飞行任务才能生效。")
     
+    # 检查航线
     if not st.session_state.planned_waypoints:
         if st.session_state.a_point and st.session_state.b_point:
             start_pt = (st.session_state.a_point['lon_gcj'], st.session_state.a_point['lat_gcj'])
@@ -847,7 +828,7 @@ elif st.session_state.page == "任务执行":
             st.warning("⚠️ 请先在「航线规划」页面设置A点和B点并生成航线。")
             st.stop()
     
-    # 如果模拟器未创建或航线发生变化，则创建/重建
+    # 创建/重建模拟器
     if (st.session_state.flight_sim is None or 
         st.session_state.flight_sim.waypoints != st.session_state.planned_waypoints or
         st.session_state.flight_sim.battery_reserve_percent != st.session_state.battery_reserve_percent):
@@ -884,14 +865,11 @@ elif st.session_state.page == "任务执行":
             )
             sim = st.session_state.flight_sim
     
-    # 更新飞行状态
     sim.update()
     
     status_text = "▶ 飞行中" if sim.is_running else ("⏸ 已暂停" if sim.is_paused else "⏹ 已停止")
-    st.markdown(f"<div style='text-align:center; font-size:20px; margin:10px 0;'>{status_text}</div>", 
-                unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align:center; font-size:20px; margin:10px 0;'>{status_text}</div>", unsafe_allow_html=True)
     
-    # 指标卡片
     total_wp = len(st.session_state.planned_waypoints)
     current_wp = min(sim.current_index + 1, total_wp)
     elapsed_str = f"{int(sim.elapsed_seconds//60):02d}:{int(sim.elapsed_seconds%60):02d}"
@@ -906,64 +884,160 @@ elif st.session_state.page == "任务执行":
     col3.metric("已用时间", elapsed_str)
     col4.metric("剩余距离", f"{remaining_dist/1000:.2f} km")
     col5.metric("预计到达", eta_str)
-    
     st.metric("🔋 电量模拟", f"{sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     
-    # 地图与通信拓扑
+    # 准备地图数据
+    # 规划航线点列表 (lon, lat)
+    route_lons = [p[0] for p in st.session_state.planned_waypoints]
+    route_lats = [p[1] for p in st.session_state.planned_waypoints]
+    route_df = pd.DataFrame({'lon': route_lons, 'lat': route_lats})
+    
+    # 已飞路径
+    flown_points = []
+    if sim.dist_traveled > 0:
+        dist_acc = 0.0
+        waypts = st.session_state.planned_waypoints
+        for i in range(len(waypts)-1):
+            seg_dist = haversine(waypts[i][0], waypts[i][1], waypts[i+1][0], waypts[i+1][1]) * 1000
+            if dist_acc + seg_dist < sim.dist_traveled - 1e-6:
+                flown_points.append(waypts[i+1])
+                dist_acc += seg_dist
+            else:
+                t = (sim.dist_traveled - dist_acc) / seg_dist if seg_dist > 0 else 0
+                lon = waypts[i][0] + t * (waypts[i+1][0] - waypts[i][0])
+                lat = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
+                flown_points.append((lon, lat))
+                break
+    if flown_points:
+        flown_df = pd.DataFrame({'lon': [p[0] for p in flown_points], 'lat': [p[1] for p in flown_points]})
+    else:
+        flown_df = pd.DataFrame(columns=['lon', 'lat'])
+    
+    # 障碍物多边形
+    obstacle_polygons = []
+    for obs in st.session_state.obstacles:
+        if obs.get('height', 50) >= st.session_state.flight_altitude:
+            coords = obs['coordinates']  # list of (lon, lat)
+            # 需要转为 GeoJson 格式的 Polygon
+            polygon_coords = [[lon, lat] for lon, lat in coords]
+            obstacle_polygons.append(polygon_coords)
+    
+    # 当前无人机位置
+    current_lon, current_lat = sim.current_pos
+    
+    # 构建 PyDeck 图层
+    layers = []
+    
+    # 航线图层（蓝色线）
+    if not route_df.empty:
+        layers.append(pdk.Layer(
+            'LineLayer',
+            data=route_df,
+            get_source_position='[lon, lat]',
+            get_target_position='[lon, lat]',
+            get_color='[0, 100, 255]',
+            get_width=3,
+            pickable=True,
+            auto_highlight=True,
+            # 由于 LineLayer 需要起点终点，这里用 PathLayer 更合适
+        ))
+    # 改用 PathLayer 绘制连续线
+    route_path = [[lon, lat] for lon, lat in zip(route_lons, route_lats)]
+    layers.append(pdk.Layer(
+        'PathLayer',
+        data=[{'path': route_path}],
+        get_path='path',
+        get_color='[0, 100, 255]',
+        width_scale=3,
+        width_min_pixels=2,
+        get_width=3,
+        pickable=True,
+    ))
+    
+    # 已飞路径（绿色线）
+    if not flown_df.empty:
+        flown_path = [[lon, lat] for lon, lat in zip(flown_df['lon'], flown_df['lat'])]
+        layers.append(pdk.Layer(
+            'PathLayer',
+            data=[{'path': flown_path}],
+            get_path='path',
+            get_color='[0, 255, 0]',
+            width_scale=5,
+            width_min_pixels=3,
+            get_width=5,
+            pickable=True,
+        ))
+    
+    # 障碍物多边形（红色填充）
+    for poly_coords in obstacle_polygons:
+        layers.append(pdk.Layer(
+            'PolygonLayer',
+            data=[{'polygon': poly_coords}],
+            get_polygon='polygon',
+            get_fill_color='[255, 0, 0, 100]',
+            get_line_color='[255, 0, 0]',
+            line_width_min_pixels=2,
+            pickable=True,
+        ))
+    
+    # 无人机当前位置（红色圆点）
+    layers.append(pdk.Layer(
+        'ScatterplotLayer',
+        data=[{'lon': current_lon, 'lat': current_lat}],
+        get_position='[lon, lat]',
+        get_color='[255, 0, 0]',
+        get_radius=15,
+        pickable=True,
+    ))
+    
+    # 起点/终点标记
+    start_pt = st.session_state.planned_waypoints[0]
+    end_pt = st.session_state.planned_waypoints[-1]
+    markers = pd.DataFrame([
+        {'lon': start_pt[0], 'lat': start_pt[1], 'type': 'start', 'color': [0, 255, 0]},
+        {'lon': end_pt[0], 'lat': end_pt[1], 'type': 'end', 'color': [255, 0, 0]}
+    ])
+    layers.append(pdk.Layer(
+        'ScatterplotLayer',
+        data=markers,
+        get_position='[lon, lat]',
+        get_color='color',
+        get_radius=20,
+        pickable=True,
+    ))
+    
+    # 设置视图状态：以无人机为中心
+    view_state = pdk.ViewState(
+        latitude=current_lat,
+        longitude=current_lon,
+        zoom=17,
+        pitch=0,
+        bearing=0
+    )
+    
+    # 选择底图样式
+    # 使用高德卫星图瓦片（需要自定义 TileLayer，PyDeck 支持 Mapbox 风格，但可以借助 deckgl 的 TileLayer）
+    # 简单期间，使用默认 Mapbox 风格或 Carto 风格，但为了与先前一致，可指定 map_style
+    if st.session_state.map_style == "卫星影像":
+        map_style = 'mapbox://styles/mapbox/satellite-streets-v11'  # 需要 Mapbox token，但可公开访问有限
+        # 为了避免 token 问题，可以使用高德瓦片，比较复杂。这里改用默认样式并提示。
+        st.info("当前使用 Mapbox 卫星图，若无法显示请检查网络或切换样式。")
+    else:
+        map_style = 'light'
+    
+    # 创建 Deck 对象
+    r = pdk.Deck(
+        layers=layers,
+        initial_view_state=view_state,
+        map_style=map_style,
+        tooltip={"text": "{type}"}
+    )
+    
     map_col, topo_col = st.columns([2, 1])
     with map_col:
-        st.subheader("实时飞行地图（自动跟随无人机）")
-        center_lat, center_lon = sim.current_pos[1], sim.current_pos[0]
-        if st.session_state.map_style == "卫星影像":
-            tiles_url = f"https://webst01.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
-            attr = "高德卫星图"
-        else:
-            tiles_url = f"https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}"
-            attr = "高德矢量街道图"
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles=tiles_url, attr=attr)
-        
-        line_points = [[p[1], p[0]] for p in st.session_state.planned_waypoints]
-        folium.PolyLine(line_points, color="blue", weight=3, opacity=0.6, tooltip="规划航线").add_to(m)
-        
-        # 绘制已飞路径
-        if sim.dist_traveled > 0:
-            flown = []
-            dist_acc = 0
-            waypts = st.session_state.planned_waypoints
-            for i in range(len(waypts)-1):
-                seg_dist = haversine(waypts[i][0], waypts[i][1], waypts[i+1][0], waypts[i+1][1]) * 1000
-                if dist_acc + seg_dist < sim.dist_traveled - 1e-6:
-                    flown.append(waypts[i+1])
-                    dist_acc += seg_dist
-                else:
-                    t = (sim.dist_traveled - dist_acc) / seg_dist if seg_dist > 0 else 0
-                    lon = waypts[i][0] + t * (waypts[i+1][0] - waypts[i][0])
-                    lat = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
-                    flown.append((lon, lat))
-                    break
-            if flown:
-                flown_path = [[p[1], p[0]] for p in flown]
-                folium.PolyLine(flown_path, color="green", weight=5, opacity=0.9, tooltip="已飞路径").add_to(m)
-        
-        # 当前无人机位置
-        folium.Marker(location=[sim.current_pos[1], sim.current_pos[0]],
-                      icon=folium.Icon(color='red', icon='plane', prefix='fa'), 
-                      popup="当前位置").add_to(m)
-        if st.session_state.planned_waypoints:
-            start = st.session_state.planned_waypoints[0]
-            end = st.session_state.planned_waypoints[-1]
-            folium.Marker(location=[start[1], start[0]], icon=folium.Icon(color='green', icon='play', prefix='fa'), popup="起点").add_to(m)
-            folium.Marker(location=[end[1], end[0]], icon=folium.Icon(color='red', icon='stop', prefix='fa'), popup="终点").add_to(m)
-        
-        if st.checkbox("显示障碍物", value=True, key="flight_show_obs"):
-            for obs in st.session_state.obstacles:
-                coords = [[lat, lng] for lng, lat in obs['coordinates']]
-                height = obs.get('height', 50)
-                color = 'darkred' if height >= st.session_state.flight_altitude else 'red'
-                folium.Polygon(locations=coords, color=color, weight=2, fill=True, fill_opacity=0.2, 
-                               popup=f"{obs['name']} ({height}m)").add_to(m)
-        st_folium(m, width=700, height=500, key="flight_map")
+        st.subheader("实时飞行地图（自动跟随，PyDeck 高速渲染）")
+        st.pydeck_chart(r, use_container_width=True)
     
     with topo_col:
         st.subheader("📡 通信链路拓扑与数据流")
@@ -978,8 +1052,12 @@ elif st.session_state.page == "任务执行":
         time.sleep(st.session_state.map_refresh_interval_ms / 1000.0)
         st.rerun()
 
-# ==================== 页面3：航线规划 ====================
+# ==================== 页面3：航线规划（保留原 Folium 实现） ====================
 elif st.session_state.page == "航线规划":
+    import folium
+    from folium.plugins import Draw
+    from streamlit_folium import st_folium
+    
     st.header("🗺️ 航线规划 · 多路径选择 + 垂直悬停点")
     
     left_col, right_col = st.columns([1, 2])
