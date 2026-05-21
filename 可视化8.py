@@ -47,6 +47,36 @@ def wgs84_to_gcj02(lng, lat):
     mglng = lng + dlng
     return mglng, mglat
 
+def gcj02_to_wgs84(lng, lat):
+    """
+    中国火星坐标系 (GCJ-02) 转 WGS-84 (近似, 精度约1-2米)
+    """
+    a = 6378245.0
+    ee = 0.00669342162296594323
+    def transform_lat(x, y):
+        ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * abs(x)
+        ret += (20.0 * sin(6.0 * x * pi) + 20.0 * sin(2.0 * x * pi)) * 2.0 / 3.0
+        ret += (20.0 * sin(y * pi) + 40.0 * sin(y / 3.0 * pi)) * 2.0 / 3.0
+        ret += (160.0 * sin(y / 12.0 * pi) + 320 * sin(y * pi / 30.0)) * 2.0 / 3.0
+        return ret
+    def transform_lng(x, y):
+        ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * abs(x)
+        ret += (20.0 * sin(6.0 * x * pi) + 20.0 * sin(2.0 * x * pi)) * 2.0 / 3.0
+        ret += (20.0 * sin(x * pi) + 40.0 * sin(x / 3.0 * pi)) * 2.0 / 3.0
+        ret += (150.0 * sin(x / 12.0 * pi) + 300.0 * sin(x / 30.0 * pi)) * 2.0 / 3.0
+        return ret
+    dlat = transform_lat(lng - 105.0, lat - 35.0)
+    dlng = transform_lng(lng - 105.0, lat - 35.0)
+    radlat = lat / 180.0 * pi
+    magic = sin(radlat)
+    magic = 1 - ee * magic * magic
+    sqrtmagic = sqrt(magic)
+    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * pi)
+    dlng = (dlng * 180.0) / (a / sqrtmagic * cos(radlat) * pi)
+    wgs_lat = lat - dlat
+    wgs_lng = lng - dlng
+    return wgs_lng, wgs_lat
+
 def haversine(lon1, lat1, lon2, lat2):
     R = 6371
     dlon = radians(lon2 - lon1)
@@ -967,15 +997,18 @@ elif st.session_state.page == "任务执行":
     st.metric("🔋 电量模拟", f"{sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     
-    # 准备地图数据
-    route_lons = [p[0] for p in st.session_state.planned_waypoints]
-    route_lats = [p[1] for p in st.session_state.planned_waypoints]
+    # ====== 地图数据准备：将所有 GCJ-02 坐标转换为 WGS-84 ======
+    # 1. 航线点转换
+    wgs_waypoints = [gcj02_to_wgs84(lon, lat) for (lon, lat) in st.session_state.planned_waypoints]
+    route_lons = [p[0] for p in wgs_waypoints]
+    route_lats = [p[1] for p in wgs_waypoints]
     route_path = [[lon, lat] for lon, lat in zip(route_lons, route_lats)]
     
+    # 2. 已飞路径点转换（如果存在）
     flown_points = []
     if sim.dist_traveled > 0:
         dist_acc = 0.0
-        waypts = st.session_state.planned_waypoints
+        waypts = st.session_state.planned_waypoints  # GCJ-02
         for i in range(len(waypts)-1):
             seg_dist = haversine(waypts[i][0], waypts[i][1], waypts[i+1][0], waypts[i+1][1]) * 1000
             if dist_acc + seg_dist < sim.dist_traveled - 1e-6:
@@ -987,19 +1020,29 @@ elif st.session_state.page == "任务执行":
                 lat = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
                 flown_points.append((lon, lat))
                 break
-    flown_path = [[lon, lat] for lon, lat in flown_points]
+    # 转换已飞路径到 WGS-84
+    flown_wgs = [gcj02_to_wgs84(lon, lat) for (lon, lat) in flown_points]
+    flown_path = [[lon, lat] for lon, lat in flown_wgs]
     
+    # 3. 障碍物（保持原样，因为存储时已经是 WGS-84）
     obstacle_polygons = []
     for obs in st.session_state.obstacles:
         if obs.get('height', 50) >= st.session_state.flight_altitude:
             coords = obs['coordinates']
-            polygon_coords = [[lon, lat] for lon, lat in coords]
+            polygon_coords = [[lon, lat] for lon, lat in coords]  # 已经是 WGS-84
             obstacle_polygons.append(polygon_coords)
     
-    current_lon, current_lat = sim.current_pos
+    # 4. 当前无人机位置（GCJ-02 转 WGS-84）
+    current_lon_gcj, current_lat_gcj = sim.current_pos
+    current_lon_wgs, current_lat_wgs = gcj02_to_wgs84(current_lon_gcj, current_lat_gcj)
     
+    # 5. 起点、终点（取转换后的首尾）
+    start_wgs = wgs_waypoints[0]
+    end_wgs = wgs_waypoints[-1]
+    
+    # 构建 PyDeck 图层
     layers = []
-    # 航线
+    # 航线（整条路径）
     layers.append(pdk.Layer(
         'PathLayer',
         data=[{'path': route_path}],
@@ -1022,7 +1065,7 @@ elif st.session_state.page == "任务执行":
             get_width=5,
             pickable=True,
         ))
-    # 障碍物
+    # 障碍物（WGS-84 多边形）
     for poly_coords in obstacle_polygons:
         layers.append(pdk.Layer(
             'PolygonLayer',
@@ -1033,19 +1076,19 @@ elif st.session_state.page == "任务执行":
             line_width_min_pixels=2,
             pickable=True,
         ))
-    # 无人机位置
+    # 无人机当前位置
     layers.append(pdk.Layer(
         'ScatterplotLayer',
-        data=[{'lon': current_lon, 'lat': current_lat}],
+        data=[{'lon': current_lon_wgs, 'lat': current_lat_wgs}],
         get_position='[lon, lat]',
         get_color='[255, 0, 0]',
         get_radius=15,
         pickable=True,
     ))
-    # 起点终点
+    # 起点/终点标记
     markers = pd.DataFrame([
-        {'lon': st.session_state.planned_waypoints[0][0], 'lat': st.session_state.planned_waypoints[0][1], 'type': 'start', 'color': [0, 255, 0]},
-        {'lon': st.session_state.planned_waypoints[-1][0], 'lat': st.session_state.planned_waypoints[-1][1], 'type': 'end', 'color': [255, 0, 0]}
+        {'lon': start_wgs[0], 'lat': start_wgs[1], 'type': 'start', 'color': [0, 255, 0]},
+        {'lon': end_wgs[0], 'lat': end_wgs[1], 'type': 'end', 'color': [255, 0, 0]}
     ])
     layers.append(pdk.Layer(
         'ScatterplotLayer',
@@ -1056,7 +1099,7 @@ elif st.session_state.page == "任务执行":
         pickable=True,
     ))
     
-    view_state = pdk.ViewState(latitude=current_lat, longitude=current_lon, zoom=17, pitch=0, bearing=0)
+    view_state = pdk.ViewState(latitude=current_lat_wgs, longitude=current_lon_wgs, zoom=17, pitch=0, bearing=0)
     map_style = 'mapbox://styles/mapbox/satellite-streets-v11' if st.session_state.map_style == "卫星影像" else 'light'
     
     r = pdk.Deck(layers=layers, initial_view_state=view_state, map_style=map_style, tooltip={"text": "{type}"})
@@ -1074,7 +1117,6 @@ elif st.session_state.page == "任务执行":
         st.markdown(link_topology_html(delay, loss), unsafe_allow_html=True)
         
         st.subheader("📜 通信日志")
-        # 方向选择控件
         log_direction = st.radio(
             "业务流程方向",
             ["全部", "GCS→OBC→FCU", "FCU→OBC→GCS", "系统消息"],
