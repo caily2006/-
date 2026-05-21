@@ -48,9 +48,6 @@ def wgs84_to_gcj02(lng, lat):
     return mglng, mglat
 
 def gcj02_to_wgs84(lng, lat):
-    """
-    中国火星坐标系 (GCJ-02) 转 WGS-84 (近似, 精度约1-2米)
-    """
     a = 6378245.0
     ee = 0.00669342162296594323
     def transform_lat(x, y):
@@ -330,19 +327,14 @@ def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km
         return False, min_dist, nearest_obs
     return True, min_dist, None
 
-# ==================== 通信日志管理器（支持方向筛选） ====================
+# ==================== 通信日志管理器 ====================
 class CommunicationLogger:
     def __init__(self, maxlen=100):
         self.logs = deque(maxlen=maxlen)
     
     def add_log(self, message, source="SYSTEM", direction=None):
-        """
-        direction 可选值: 'GCS->OBC->FCU', 'FCU->OBC->GCS', 'SYSTEM'
-        如果不指定，根据 message 内容自动判断
-        """
         timestamp = datetime.datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
         if direction is None:
-            # 自动判断方向
             if "GCS→OBC→FCU" in message or "GCS->OBC->FCU" in message:
                 direction = "GCS->OBC->FCU"
             elif "FCU→OBC→GCS" in message or "FCU->OBC->GCS" in message:
@@ -357,9 +349,6 @@ class CommunicationLogger:
         })
     
     def get_logs(self, direction_filter=None, reverse=True):
-        """
-        direction_filter: None 表示全部, 或 'GCS->OBC->FCU', 'FCU->OBC->GCS', 'SYSTEM'
-        """
         logs_list = list(self.logs)
         if direction_filter is not None:
             logs_list = [log for log in logs_list if log['direction'] == direction_filter]
@@ -480,13 +469,11 @@ class FlightSimulator:
                     self.dist_traveled = target_dist
                     break
                 dist_accum += seg_dist
-        # 检查航点到达日志
         if self.current_index > self.last_logged_wp_index:
             for wp_idx in range(self.last_logged_wp_index + 1, self.current_index + 1):
                 if self.logger:
                     self.logger.add_log(f"FCU→OBC→GCS: WP_REACHED #{wp_idx}", "FCU", direction="FCU->OBC->GCS")
             self.last_logged_wp_index = self.current_index
-        # 电量模拟
         progress = self.dist_traveled / self.total_distance if self.total_distance > 0 else 1
         self.battery_percent = max(0, 100 - progress * (100 - self.battery_reserve_percent))
 
@@ -764,6 +751,9 @@ if "map_refresh_interval_ms" not in st.session_state:
     st.session_state.map_refresh_interval_ms = 200
 if "comm_logger" not in st.session_state:
     st.session_state.comm_logger = CommunicationLogger(maxlen=100)
+# 任务执行地图底图选项
+if "execution_map_type" not in st.session_state:
+    st.session_state.execution_map_type = "高德卫星 (GCJ-02)"
 
 # 创建心跳模拟器
 if st.session_state.simulator is None:
@@ -906,8 +896,18 @@ if st.session_state.page == "心跳监控":
 elif st.session_state.page == "任务执行":
     st.header("✈️ 飞行实时画面 - 任务执行监控")
     
+    # 地图底图选择
+    map_type = st.radio(
+        "地图底图",
+        ["高德卫星 (GCJ-02)", "Mapbox (WGS-84)"],
+        horizontal=True,
+        index=0 if st.session_state.execution_map_type == "高德卫星 (GCJ-02)" else 1,
+        key="map_type_radio"
+    )
+    st.session_state.execution_map_type = map_type
+    
     refresh_ms = st.slider("🖼️ 地图刷新间隔（毫秒）", min_value=50, max_value=500, value=st.session_state.map_refresh_interval_ms, step=10,
-                           help="间隔越小，画面越流畅。建议 100-200ms。")
+                           help="间隔越小，画面越流畅。建议 150-300ms。高德地图模式下刷新较慢，可适当调大间隔。")
     st.session_state.map_refresh_interval_ms = refresh_ms
     
     col_reserve1, col_reserve2 = st.columns([1, 3])
@@ -997,119 +997,182 @@ elif st.session_state.page == "任务执行":
     st.metric("🔋 电量模拟", f"{sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     
-    # ====== 地图数据准备：将所有 GCJ-02 坐标转换为 WGS-84 ======
-    # 1. 航线点转换
-    wgs_waypoints = [gcj02_to_wgs84(lon, lat) for (lon, lat) in st.session_state.planned_waypoints]
-    route_lons = [p[0] for p in wgs_waypoints]
-    route_lats = [p[1] for p in wgs_waypoints]
-    route_path = [[lon, lat] for lon, lat in zip(route_lons, route_lats)]
+    # 根据地图类型渲染
+    if st.session_state.execution_map_type == "高德卫星 (GCJ-02)":
+        # 使用 folium + 高德底图 (GCJ-02)
+        import folium
+        from streamlit_folium import st_folium
+        
+        # 获取当前位置 (GCJ-02)
+        current_lat, current_lon = sim.current_pos[1], sim.current_pos[0]
+        
+        # 构建地图，中心点为无人机当前位置
+        m = folium.Map(
+            location=[current_lat, current_lon],
+            zoom_start=17,
+            tiles=f"https://webst01.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}&key={AMAP_KEY}",
+            attr="高德卫星图"
+        )
+        
+        # 1. 绘制完整航线 (GCJ-02)
+        route_points = [[p[1], p[0]] for p in st.session_state.planned_waypoints]  # (lat, lon)
+        folium.PolyLine(route_points, color='#00BFFF', weight=4, opacity=0.8, popup="规划航线").add_to(m)
+        
+        # 2. 绘制已飞路径 (GCJ-02)
+        if sim.dist_traveled > 0:
+            flown_points = []
+            dist_acc = 0.0
+            waypts = st.session_state.planned_waypoints
+            for i in range(len(waypts)-1):
+                seg_dist = haversine(waypts[i][0], waypts[i][1], waypts[i+1][0], waypts[i+1][1]) * 1000
+                if dist_acc + seg_dist < sim.dist_traveled - 1e-6:
+                    flown_points.append(waypts[i+1])
+                    dist_acc += seg_dist
+                else:
+                    t = (sim.dist_traveled - dist_acc) / seg_dist if seg_dist > 0 else 0
+                    lon = waypts[i][0] + t * (waypts[i+1][0] - waypts[i][0])
+                    lat = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
+                    flown_points.append((lon, lat))
+                    break
+            if flown_points:
+                flown_latlng = [[p[1], p[0]] for p in flown_points]
+                folium.PolyLine(flown_latlng, color='#00FF00', weight=5, opacity=0.9, popup="已飞路径").add_to(m)
+        
+        # 3. 障碍物 (GCJ-02)
+        for obs in st.session_state.obstacles:
+            if obs.get('height', 50) >= st.session_state.flight_altitude:
+                coords = obs['coordinates']  # 存储的已经是 GCJ-02 坐标 (lon, lat)
+                polygon_latlng = [[lat, lon] for lon, lat in coords]
+                folium.Polygon(
+                    locations=polygon_latlng,
+                    color='red',
+                    weight=3,
+                    fill=True,
+                    fill_opacity=0.3,
+                    popup=f"{obs['name']}<br>高度: {obs.get('height', 50)}m"
+                ).add_to(m)
+        
+        # 4. 无人机当前位置 (GCJ-02)
+        folium.Marker(
+            location=[current_lat, current_lon],
+            popup=f"无人机<br>速度: {sim.speed:.1f} m/s<br>电量: {sim.battery_percent:.0f}%",
+            icon=folium.Icon(color='red', icon='plane', prefix='fa')
+        ).add_to(m)
+        
+        # 5. 起点和终点 (GCJ-02)
+        start_lat, start_lon = st.session_state.planned_waypoints[0][1], st.session_state.planned_waypoints[0][0]
+        end_lat, end_lon = st.session_state.planned_waypoints[-1][1], st.session_state.planned_waypoints[-1][0]
+        folium.Marker(location=[start_lat, start_lon], popup="起点", icon=folium.Icon(color='green', icon='play', prefix='fa')).add_to(m)
+        folium.Marker(location=[end_lat, end_lon], popup="终点", icon=folium.Icon(color='darkred', icon='stop', prefix='fa')).add_to(m)
+        
+        # 显示地图
+        st_folium(m, width=700, height=500, key="exec_folium_map")
     
-    # 2. 已飞路径点转换（如果存在）
-    flown_points = []
-    if sim.dist_traveled > 0:
-        dist_acc = 0.0
-        waypts = st.session_state.planned_waypoints  # GCJ-02
-        for i in range(len(waypts)-1):
-            seg_dist = haversine(waypts[i][0], waypts[i][1], waypts[i+1][0], waypts[i+1][1]) * 1000
-            if dist_acc + seg_dist < sim.dist_traveled - 1e-6:
-                flown_points.append(waypts[i+1])
-                dist_acc += seg_dist
-            else:
-                t = (sim.dist_traveled - dist_acc) / seg_dist if seg_dist > 0 else 0
-                lon = waypts[i][0] + t * (waypts[i+1][0] - waypts[i][0])
-                lat = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
-                flown_points.append((lon, lat))
-                break
-    # 转换已飞路径到 WGS-84
-    flown_wgs = [gcj02_to_wgs84(lon, lat) for (lon, lat) in flown_points]
-    flown_path = [[lon, lat] for lon, lat in flown_wgs]
-    
-    # 3. 障碍物（保持原样，因为存储时已经是 WGS-84）
-    obstacle_polygons = []
-    for obs in st.session_state.obstacles:
-        if obs.get('height', 50) >= st.session_state.flight_altitude:
-            coords = obs['coordinates']
-            polygon_coords = [[lon, lat] for lon, lat in coords]  # 已经是 WGS-84
-            obstacle_polygons.append(polygon_coords)
-    
-    # 4. 当前无人机位置（GCJ-02 转 WGS-84）
-    current_lon_gcj, current_lat_gcj = sim.current_pos
-    current_lon_wgs, current_lat_wgs = gcj02_to_wgs84(current_lon_gcj, current_lat_gcj)
-    
-    # 5. 起点、终点（取转换后的首尾）
-    start_wgs = wgs_waypoints[0]
-    end_wgs = wgs_waypoints[-1]
-    
-    # 构建 PyDeck 图层
-    layers = []
-    # 航线（整条路径）
-    layers.append(pdk.Layer(
-        'PathLayer',
-        data=[{'path': route_path}],
-        get_path='path',
-        get_color='[0, 100, 255]',
-        width_scale=3,
-        width_min_pixels=2,
-        get_width=3,
-        pickable=True,
-    ))
-    # 已飞路径
-    if flown_path:
+    else:
+        # 原有 pydeck 地图 (Mapbox WGS-84)
+        # 将所有 GCJ-02 坐标转换为 WGS-84
+        wgs_waypoints = [gcj02_to_wgs84(lon, lat) for (lon, lat) in st.session_state.planned_waypoints]
+        route_lons = [p[0] for p in wgs_waypoints]
+        route_lats = [p[1] for p in wgs_waypoints]
+        route_path = [[lon, lat] for lon, lat in zip(route_lons, route_lats)]
+        
+        # 已飞路径
+        flown_points = []
+        if sim.dist_traveled > 0:
+            dist_acc = 0.0
+            waypts = st.session_state.planned_waypoints
+            for i in range(len(waypts)-1):
+                seg_dist = haversine(waypts[i][0], waypts[i][1], waypts[i+1][0], waypts[i+1][1]) * 1000
+                if dist_acc + seg_dist < sim.dist_traveled - 1e-6:
+                    flown_points.append(waypts[i+1])
+                    dist_acc += seg_dist
+                else:
+                    t = (sim.dist_traveled - dist_acc) / seg_dist if seg_dist > 0 else 0
+                    lon = waypts[i][0] + t * (waypts[i+1][0] - waypts[i][0])
+                    lat = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
+                    flown_points.append((lon, lat))
+                    break
+        flown_wgs = [gcj02_to_wgs84(lon, lat) for (lon, lat) in flown_points]
+        flown_path = [[lon, lat] for lon, lat in flown_wgs]
+        
+        # 障碍物 (存储为 GCJ-02，需转换为 WGS-84)
+        obstacle_polygons = []
+        for obs in st.session_state.obstacles:
+            if obs.get('height', 50) >= st.session_state.flight_altitude:
+                coords_gcj = obs['coordinates']  # (lon, lat) GCJ-02
+                coords_wgs = [gcj02_to_wgs84(lon, lat) for lon, lat in coords_gcj]
+                polygon_coords = [[lon, lat] for lon, lat in coords_wgs]
+                obstacle_polygons.append(polygon_coords)
+        
+        # 当前无人机位置
+        current_lon_gcj, current_lat_gcj = sim.current_pos
+        current_lon_wgs, current_lat_wgs = gcj02_to_wgs84(current_lon_gcj, current_lat_gcj)
+        
+        # 起点终点
+        start_wgs = wgs_waypoints[0]
+        end_wgs = wgs_waypoints[-1]
+        
+        # 构建图层
+        layers = []
         layers.append(pdk.Layer(
             'PathLayer',
-            data=[{'path': flown_path}],
+            data=[{'path': route_path}],
             get_path='path',
-            get_color='[0, 255, 0]',
-            width_scale=5,
-            width_min_pixels=3,
-            get_width=5,
+            get_color='[0, 100, 255]',
+            width_scale=3,
+            width_min_pixels=2,
+            get_width=3,
             pickable=True,
         ))
-    # 障碍物（WGS-84 多边形）
-    for poly_coords in obstacle_polygons:
+        if flown_path:
+            layers.append(pdk.Layer(
+                'PathLayer',
+                data=[{'path': flown_path}],
+                get_path='path',
+                get_color='[0, 255, 0]',
+                width_scale=5,
+                width_min_pixels=3,
+                get_width=5,
+                pickable=True,
+            ))
+        for poly_coords in obstacle_polygons:
+            layers.append(pdk.Layer(
+                'PolygonLayer',
+                data=[{'polygon': poly_coords}],
+                get_polygon='polygon',
+                get_fill_color='[255, 0, 0, 100]',
+                get_line_color='[255, 0, 0]',
+                line_width_min_pixels=2,
+                pickable=True,
+            ))
         layers.append(pdk.Layer(
-            'PolygonLayer',
-            data=[{'polygon': poly_coords}],
-            get_polygon='polygon',
-            get_fill_color='[255, 0, 0, 100]',
-            get_line_color='[255, 0, 0]',
-            line_width_min_pixels=2,
+            'ScatterplotLayer',
+            data=[{'lon': current_lon_wgs, 'lat': current_lat_wgs}],
+            get_position='[lon, lat]',
+            get_color='[255, 0, 0]',
+            get_radius=15,
             pickable=True,
         ))
-    # 无人机当前位置
-    layers.append(pdk.Layer(
-        'ScatterplotLayer',
-        data=[{'lon': current_lon_wgs, 'lat': current_lat_wgs}],
-        get_position='[lon, lat]',
-        get_color='[255, 0, 0]',
-        get_radius=15,
-        pickable=True,
-    ))
-    # 起点/终点标记
-    markers = pd.DataFrame([
-        {'lon': start_wgs[0], 'lat': start_wgs[1], 'type': 'start', 'color': [0, 255, 0]},
-        {'lon': end_wgs[0], 'lat': end_wgs[1], 'type': 'end', 'color': [255, 0, 0]}
-    ])
-    layers.append(pdk.Layer(
-        'ScatterplotLayer',
-        data=markers,
-        get_position='[lon, lat]',
-        get_color='color',
-        get_radius=20,
-        pickable=True,
-    ))
-    
-    view_state = pdk.ViewState(latitude=current_lat_wgs, longitude=current_lon_wgs, zoom=17, pitch=0, bearing=0)
-    map_style = 'mapbox://styles/mapbox/satellite-streets-v11' if st.session_state.map_style == "卫星影像" else 'light'
-    
-    r = pdk.Deck(layers=layers, initial_view_state=view_state, map_style=map_style, tooltip={"text": "{type}"})
-    
-    map_col, topo_col = st.columns([2, 1])
-    with map_col:
-        st.subheader("实时飞行地图（自动跟随，PyDeck 高速渲染）")
+        markers = pd.DataFrame([
+            {'lon': start_wgs[0], 'lat': start_wgs[1], 'type': 'start', 'color': [0, 255, 0]},
+            {'lon': end_wgs[0], 'lat': end_wgs[1], 'type': 'end', 'color': [255, 0, 0]}
+        ])
+        layers.append(pdk.Layer(
+            'ScatterplotLayer',
+            data=markers,
+            get_position='[lon, lat]',
+            get_color='color',
+            get_radius=20,
+            pickable=True,
+        ))
+        
+        view_state = pdk.ViewState(latitude=current_lat_wgs, longitude=current_lon_wgs, zoom=17, pitch=0, bearing=0)
+        map_style = 'mapbox://styles/mapbox/satellite-streets-v11' if st.session_state.map_style == "卫星影像" else 'light'
+        r = pdk.Deck(layers=layers, initial_view_state=view_state, map_style=map_style, tooltip={"text": "{type}"})
         st.pydeck_chart(r, use_container_width=True)
     
-    with topo_col:
+    # 右侧通信面板（两种地图模式共用）
+    with st.container():
         st.subheader("📡 通信链路拓扑与数据流")
         heart_stats = st.session_state.simulator.get_statistics()
         delay = heart_stats['avg_delay']
@@ -1121,7 +1184,7 @@ elif st.session_state.page == "任务执行":
             "业务流程方向",
             ["全部", "GCS→OBC→FCU", "FCU→OBC→GCS", "系统消息"],
             horizontal=True,
-            key="log_direction_filter"
+            key="log_direction_filter_exec"
         )
         dir_map = {
             "全部": None,
@@ -1133,7 +1196,7 @@ elif st.session_state.page == "任务执行":
         logs = st.session_state.comm_logger.get_logs(direction_filter=filter_val, reverse=True)
         log_text = "\n".join(logs) if logs else "暂无通信日志"
         st.text_area("", log_text, height=400, label_visibility="collapsed")
-        if st.button("清空日志", key="clear_logs"):
+        if st.button("清空日志", key="clear_logs_exec"):
             st.session_state.comm_logger.clear()
             st.rerun()
     
@@ -1279,7 +1342,6 @@ elif st.session_state.page == "航线规划":
                 waypoints.append(seg[1])
             st.session_state.planned_waypoints = waypoints
             
-            # 记录航线规划日志
             st.session_state.comm_logger.add_log(
                 f"航线规划完成 | 类型: horizontal | 航点数: {len(waypoints)} | 路径长度: {total_dist*1000:.1f}m | 算法: A* | 障碍物数量: {len(blocking)}",
                 "OBC",
@@ -1424,10 +1486,11 @@ elif st.session_state.page == "航线规划":
             if output and 'last_active_drawing' in output and output['last_active_drawing']:
                 drawing = output['last_active_drawing']
                 if drawing and drawing.get('geometry', {}).get('type') == 'Polygon':
-                    coords = drawing['geometry']['coordinates'][0]
-                    coords = [[c[0], c[1]] for c in coords]
+                    coords_wgs = drawing['geometry']['coordinates'][0]
+                    # 将 WGS-84 坐标转换为 GCJ-02 存储
+                    coords_gcj = [wgs84_to_gcj02(c[0], c[1]) for c in coords_wgs]
                     new_name = f"障碍物_{len(st.session_state.obstacles)+1}"
-                    st.session_state.obstacles.append({"id": str(int(time.time()*1000)), "name": new_name, "coordinates": coords, "height": 50.0})
+                    st.session_state.obstacles.append({"id": str(int(time.time()*1000)), "name": new_name, "coordinates": coords_gcj, "height": 50.0})
                     save_obstacles(st.session_state.obstacles)
                     st.success(f"已添加: {new_name}")
                     st.rerun()
