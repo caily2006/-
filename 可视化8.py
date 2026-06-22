@@ -47,34 +47,6 @@ def wgs84_to_gcj02(lng, lat):
     mglng = lng + dlng
     return mglng, mglat
 
-def gcj02_to_wgs84(lng, lat):
-    """火星坐标系 (GCJ-02) 转 WGS-84 (近似，精度约1-2米)"""
-    a = 6378245.0
-    ee = 0.00669342162296594323
-    def transform_lat(x, y):
-        ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * abs(x)
-        ret += (20.0 * sin(6.0 * x * pi) + 20.0 * sin(2.0 * x * pi)) * 2.0 / 3.0
-        ret += (20.0 * sin(y * pi) + 40.0 * sin(y / 3.0 * pi)) * 2.0 / 3.0
-        ret += (160.0 * sin(y / 12.0 * pi) + 320 * sin(y * pi / 30.0)) * 2.0 / 3.0
-        return ret
-    def transform_lng(x, y):
-        ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * abs(x)
-        ret += (20.0 * sin(6.0 * x * pi) + 20.0 * sin(2.0 * x * pi)) * 2.0 / 3.0
-        ret += (20.0 * sin(x * pi) + 40.0 * sin(x / 3.0 * pi)) * 2.0 / 3.0
-        ret += (150.0 * sin(x / 12.0 * pi) + 300.0 * sin(x / 30.0 * pi)) * 2.0 / 3.0
-        return ret
-    dlat = transform_lat(lng - 105.0, lat - 35.0)
-    dlng = transform_lng(lng - 105.0, lat - 35.0)
-    radlat = lat / 180.0 * pi
-    magic = sin(radlat)
-    magic = 1 - ee * magic * magic
-    sqrtmagic = sqrt(magic)
-    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * pi)
-    dlng = (dlng * 180.0) / (a / sqrtmagic * cos(radlat) * pi)
-    wgs_lat = lat - dlat
-    wgs_lng = lng - dlng
-    return wgs_lng, wgs_lat
-
 def haversine(lon1, lat1, lon2, lat2):
     R = 6371
     dlon = radians(lon2 - lon1)
@@ -328,14 +300,19 @@ def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km
         return False, min_dist, nearest_obs
     return True, min_dist, None
 
-# ==================== 通信日志管理器 ====================
+# ==================== 通信日志管理器（支持方向筛选） ====================
 class CommunicationLogger:
     def __init__(self, maxlen=100):
         self.logs = deque(maxlen=maxlen)
     
     def add_log(self, message, source="SYSTEM", direction=None):
+        """
+        direction 可选值: 'GCS->OBC->FCU', 'FCU->OBC->GCS', 'SYSTEM'
+        如果不指定，根据 message 内容自动判断
+        """
         timestamp = datetime.datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
         if direction is None:
+            # 自动判断方向
             if "GCS→OBC→FCU" in message or "GCS->OBC->FCU" in message:
                 direction = "GCS->OBC->FCU"
             elif "FCU→OBC→GCS" in message or "FCU->OBC->GCS" in message:
@@ -350,6 +327,9 @@ class CommunicationLogger:
         })
     
     def get_logs(self, direction_filter=None, reverse=True):
+        """
+        direction_filter: None 表示全部, 或 'GCS->OBC->FCU', 'FCU->OBC->GCS', 'SYSTEM'
+        """
         logs_list = list(self.logs)
         if direction_filter is not None:
             logs_list = [log for log in logs_list if log['direction'] == direction_filter]
@@ -470,11 +450,13 @@ class FlightSimulator:
                     self.dist_traveled = target_dist
                     break
                 dist_accum += seg_dist
+        # 检查航点到达日志
         if self.current_index > self.last_logged_wp_index:
             for wp_idx in range(self.last_logged_wp_index + 1, self.current_index + 1):
                 if self.logger:
                     self.logger.add_log(f"FCU→OBC→GCS: WP_REACHED #{wp_idx}", "FCU", direction="FCU->OBC->GCS")
             self.last_logged_wp_index = self.current_index
+        # 电量模拟
         progress = self.dist_traveled / self.total_distance if self.total_distance > 0 else 1
         self.battery_percent = max(0, 100 - progress * (100 - self.battery_reserve_percent))
 
@@ -985,14 +967,11 @@ elif st.session_state.page == "任务执行":
     st.metric("🔋 电量模拟", f"{sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     
-    # ========== 坐标转换：GCJ-02 -> WGS-84 (PyDeck 需要 WGS-84) ==========
-    # 航线点
-    wgs_waypoints = [gcj02_to_wgs84(lon, lat) for (lon, lat) in st.session_state.planned_waypoints]
-    route_lons = [p[0] for p in wgs_waypoints]
-    route_lats = [p[1] for p in wgs_waypoints]
+    # 准备地图数据
+    route_lons = [p[0] for p in st.session_state.planned_waypoints]
+    route_lats = [p[1] for p in st.session_state.planned_waypoints]
     route_path = [[lon, lat] for lon, lat in zip(route_lons, route_lats)]
     
-    # 已飞路径
     flown_points = []
     if sim.dist_traveled > 0:
         dist_acc = 0.0
@@ -1008,29 +987,19 @@ elif st.session_state.page == "任务执行":
                 lat = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
                 flown_points.append((lon, lat))
                 break
-    flown_wgs = [gcj02_to_wgs84(lon, lat) for (lon, lat) in flown_points]
-    flown_path = [[lon, lat] for lon, lat in flown_wgs]
+    flown_path = [[lon, lat] for lon, lat in flown_points]
     
-    # 障碍物 (存储为 GCJ-02，需转 WGS-84)
     obstacle_polygons = []
     for obs in st.session_state.obstacles:
         if obs.get('height', 50) >= st.session_state.flight_altitude:
-            coords_gcj = obs['coordinates']
-            coords_wgs = [gcj02_to_wgs84(lon, lat) for lon, lat in coords_gcj]
-            polygon_coords = [[lon, lat] for lon, lat in coords_wgs]
+            coords = obs['coordinates']
+            polygon_coords = [[lon, lat] for lon, lat in coords]
             obstacle_polygons.append(polygon_coords)
     
-    # 当前无人机位置
-    current_lon_gcj, current_lat_gcj = sim.current_pos
-    current_lon_wgs, current_lat_wgs = gcj02_to_wgs84(current_lon_gcj, current_lat_gcj)
+    current_lon, current_lat = sim.current_pos
     
-    # 起点终点（从 wgs_waypoints 取）
-    start_wgs = wgs_waypoints[0]
-    end_wgs = wgs_waypoints[-1]
-    
-    # 构建 PyDeck 图层
     layers = []
-    # 规划航线
+    # 航线
     layers.append(pdk.Layer(
         'PathLayer',
         data=[{'path': route_path}],
@@ -1064,19 +1033,19 @@ elif st.session_state.page == "任务执行":
             line_width_min_pixels=2,
             pickable=True,
         ))
-    # 无人机
+    # 无人机位置
     layers.append(pdk.Layer(
         'ScatterplotLayer',
-        data=[{'lon': current_lon_wgs, 'lat': current_lat_wgs}],
+        data=[{'lon': current_lon, 'lat': current_lat}],
         get_position='[lon, lat]',
         get_color='[255, 0, 0]',
         get_radius=15,
         pickable=True,
     ))
-    # 起点/终点
+    # 起点终点
     markers = pd.DataFrame([
-        {'lon': start_wgs[0], 'lat': start_wgs[1], 'type': '起点', 'color': [0, 255, 0]},
-        {'lon': end_wgs[0], 'lat': end_wgs[1], 'type': '终点', 'color': [255, 0, 0]}
+        {'lon': st.session_state.planned_waypoints[0][0], 'lat': st.session_state.planned_waypoints[0][1], 'type': 'start', 'color': [0, 255, 0]},
+        {'lon': st.session_state.planned_waypoints[-1][0], 'lat': st.session_state.planned_waypoints[-1][1], 'type': 'end', 'color': [255, 0, 0]}
     ])
     layers.append(pdk.Layer(
         'ScatterplotLayer',
@@ -1087,7 +1056,7 @@ elif st.session_state.page == "任务执行":
         pickable=True,
     ))
     
-    view_state = pdk.ViewState(latitude=current_lat_wgs, longitude=current_lon_wgs, zoom=17, pitch=0, bearing=0)
+    view_state = pdk.ViewState(latitude=current_lat, longitude=current_lon, zoom=17, pitch=0, bearing=0)
     map_style = 'mapbox://styles/mapbox/satellite-streets-v11' if st.session_state.map_style == "卫星影像" else 'light'
     
     r = pdk.Deck(layers=layers, initial_view_state=view_state, map_style=map_style, tooltip={"text": "{type}"})
@@ -1105,6 +1074,7 @@ elif st.session_state.page == "任务执行":
         st.markdown(link_topology_html(delay, loss), unsafe_allow_html=True)
         
         st.subheader("📜 通信日志")
+        # 方向选择控件
         log_direction = st.radio(
             "业务流程方向",
             ["全部", "GCS→OBC→FCU", "FCU→OBC→GCS", "系统消息"],
@@ -1412,11 +1382,10 @@ elif st.session_state.page == "航线规划":
             if output and 'last_active_drawing' in output and output['last_active_drawing']:
                 drawing = output['last_active_drawing']
                 if drawing and drawing.get('geometry', {}).get('type') == 'Polygon':
-                    coords_wgs = drawing['geometry']['coordinates'][0]
-                    # 将 folium 绘制的 WGS-84 坐标转换为 GCJ-02 存储
-                    coords_gcj = [wgs84_to_gcj02(c[0], c[1]) for c in coords_wgs]
+                    coords = drawing['geometry']['coordinates'][0]
+                    coords = [[c[0], c[1]] for c in coords]
                     new_name = f"障碍物_{len(st.session_state.obstacles)+1}"
-                    st.session_state.obstacles.append({"id": str(int(time.time()*1000)), "name": new_name, "coordinates": coords_gcj, "height": 50.0})
+                    st.session_state.obstacles.append({"id": str(int(time.time()*1000)), "name": new_name, "coordinates": coords, "height": 50.0})
                     save_obstacles(st.session_state.obstacles)
                     st.success(f"已添加: {new_name}")
                     st.rerun()
