@@ -68,7 +68,7 @@ def haversine(lon1, lat1, lon2, lat2):
     c = 2 * asin(sqrt(a))
     return R * c
 
-# ==================== 几何工具（略，同原代码） ====================
+# ==================== 几何工具 ====================
 def on_segment(p, q, r):
     if (q[0] <= max(p[0], r[0]) and q[0] >= min(p[0], r[0]) and
         q[1] <= max(p[1], r[1]) and q[1] >= min(p[1], r[1])):
@@ -346,7 +346,7 @@ class CommunicationLogger:
     def clear(self):
         self.logs.clear()
 
-# ==================== 飞行监控模拟器（不变） ====================
+# ==================== 飞行监控模拟器 ====================
 class FlightSimulator:
     def __init__(self, waypoints, speed_mps=8.5, battery_reserve_percent=80, logger=None):
         self.waypoints = waypoints  # GCJ-02 坐标
@@ -455,15 +455,24 @@ class FlightSimulator:
                     self.dist_traveled = target_dist
                     break
                 dist_accum += seg_dist
+
+        # ✅ 航点到达日志增加剩余航点信息
         if self.current_index > self.last_logged_wp_index:
+            total_wp = len(self.waypoints)
             for wp_idx in range(self.last_logged_wp_index + 1, self.current_index + 1):
+                remaining = total_wp - wp_idx
                 if self.logger:
-                    self.logger.add_log(f"FCU→OBC→GCS: WP_REACHED #{wp_idx}", "FCU", direction="FCU->OBC->GCS")
+                    self.logger.add_log(
+                        f"FCU→OBC→GCS: WP_REACHED #{wp_idx} | 剩余航点: {remaining}/{total_wp}",
+                        "FCU",
+                        direction="FCU->OBC->GCS"
+                    )
             self.last_logged_wp_index = self.current_index
+
         progress = self.dist_traveled / self.total_distance if self.total_distance > 0 else 1
         self.battery_percent = max(0, 100 - progress * (100 - self.battery_reserve_percent))
 
-# ==================== 心跳模拟器（不变） ====================
+# ==================== 心跳模拟器 ====================
 class DroneHeartbeatSimulator:
     def __init__(self, timeout_seconds=3, logger=None):
         self.timeout_seconds = timeout_seconds
@@ -970,17 +979,14 @@ elif st.session_state.page == "任务执行":
     st.metric("🔋 电量模拟", f"{sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     
-    # ---------- 关键修改：将所有 GCJ-02 坐标转换为 WGS-84 ----------
-    # 转换 planned_waypoints 用于地图显示
+    # ---------- GCJ-02 转 WGS-84 用于 PyDeck 显示 ----------
     display_waypoints = []
     for p in st.session_state.planned_waypoints:
         lon_w, lat_w = gcj02_to_wgs84(p[0], p[1])
         display_waypoints.append((lon_w, lat_w))
     
     # 航线路径 (WGS-84)
-    route_lons = [p[0] for p in display_waypoints]
-    route_lats = [p[1] for p in display_waypoints]
-    route_path = [[lon, lat] for lon, lat in zip(route_lons, route_lats)]
+    route_path = [[lon, lat] for lon, lat in display_waypoints]
     
     # 已飞路径 (WGS-84)
     flown_points = []
@@ -990,7 +996,7 @@ elif st.session_state.page == "任务执行":
         for i in range(len(waypts)-1):
             seg_dist = haversine(waypts[i][0], waypts[i][1], waypts[i+1][0], waypts[i+1][1]) * 1000
             if dist_acc + seg_dist < sim.dist_traveled - 1e-6:
-                # 完全飞过的点，转换为 WGS-84 后加入
+                # 完全飞过的点
                 lon_w, lat_w = gcj02_to_wgs84(waypts[i+1][0], waypts[i+1][1])
                 flown_points.append((lon_w, lat_w))
                 dist_acc += seg_dist
@@ -1096,6 +1102,10 @@ elif st.session_state.page == "任务执行":
         delay = heart_stats['avg_delay']
         loss = heart_stats['packet_loss_rate']
         st.markdown(link_topology_html(delay, loss), unsafe_allow_html=True)
+
+        # ✅ 实时剩余航点指标
+        remaining_wp_count = total_wp - current_wp
+        st.metric("📍 剩余航点", f"{remaining_wp_count}/{total_wp}")
         
         st.subheader("📜 通信日志")
         log_direction = st.radio(
@@ -1122,7 +1132,7 @@ elif st.session_state.page == "任务执行":
         time.sleep(st.session_state.map_refresh_interval_ms / 1000.0)
         st.rerun()
 
-# ==================== 页面3：航线规划（使用 GCJ-02，不变） ====================
+# ==================== 页面3：航线规划 ====================
 elif st.session_state.page == "航线规划":
     import folium
     from folium.plugins import Draw
