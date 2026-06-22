@@ -47,6 +47,19 @@ def wgs84_to_gcj02(lng, lat):
     mglng = lng + dlng
     return mglng, mglat
 
+def gcj02_to_wgs84(lng, lat):
+    """GCJ-02 → WGS-84 迭代法（足够精度）"""
+    lng_wgs, lat_wgs = lng, lat
+    for _ in range(5):
+        lng_gcj, lat_gcj = wgs84_to_gcj02(lng_wgs, lat_wgs)
+        delta_lng = lng_gcj - lng
+        delta_lat = lat_gcj - lat
+        lng_wgs -= delta_lng
+        lat_wgs -= delta_lat
+        if abs(delta_lng) < 1e-7 and abs(delta_lat) < 1e-7:
+            break
+    return lng_wgs, lat_wgs
+
 def haversine(lon1, lat1, lon2, lat2):
     R = 6371
     dlon = radians(lon2 - lon1)
@@ -55,7 +68,7 @@ def haversine(lon1, lat1, lon2, lat2):
     c = 2 * asin(sqrt(a))
     return R * c
 
-# ==================== 几何工具 ====================
+# ==================== 几何工具（略，同原代码） ====================
 def on_segment(p, q, r):
     if (q[0] <= max(p[0], r[0]) and q[0] >= min(p[0], r[0]) and
         q[1] <= max(p[1], r[1]) and q[1] >= min(p[1], r[1])):
@@ -300,19 +313,14 @@ def check_landing_safety(destination, obstacles, flight_altitude, safe_radius_km
         return False, min_dist, nearest_obs
     return True, min_dist, None
 
-# ==================== 通信日志管理器（支持方向筛选） ====================
+# ==================== 通信日志管理器 ====================
 class CommunicationLogger:
     def __init__(self, maxlen=100):
         self.logs = deque(maxlen=maxlen)
     
     def add_log(self, message, source="SYSTEM", direction=None):
-        """
-        direction 可选值: 'GCS->OBC->FCU', 'FCU->OBC->GCS', 'SYSTEM'
-        如果不指定，根据 message 内容自动判断
-        """
         timestamp = datetime.datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
         if direction is None:
-            # 自动判断方向
             if "GCS→OBC→FCU" in message or "GCS->OBC->FCU" in message:
                 direction = "GCS->OBC->FCU"
             elif "FCU→OBC→GCS" in message or "FCU->OBC->GCS" in message:
@@ -327,9 +335,6 @@ class CommunicationLogger:
         })
     
     def get_logs(self, direction_filter=None, reverse=True):
-        """
-        direction_filter: None 表示全部, 或 'GCS->OBC->FCU', 'FCU->OBC->GCS', 'SYSTEM'
-        """
         logs_list = list(self.logs)
         if direction_filter is not None:
             logs_list = [log for log in logs_list if log['direction'] == direction_filter]
@@ -341,16 +346,16 @@ class CommunicationLogger:
     def clear(self):
         self.logs.clear()
 
-# ==================== 飞行监控模拟器 ====================
+# ==================== 飞行监控模拟器（不变） ====================
 class FlightSimulator:
     def __init__(self, waypoints, speed_mps=8.5, battery_reserve_percent=80, logger=None):
-        self.waypoints = waypoints
+        self.waypoints = waypoints  # GCJ-02 坐标
         self.speed = speed_mps
         self.total_distance = sum(haversine(waypoints[i][0], waypoints[i][1], waypoints[i+1][0], waypoints[i+1][1]) 
                                    for i in range(len(waypoints)-1)) * 1000
         self.dist_traveled = 0.0
         self.current_index = 0
-        self.current_pos = waypoints[0] if waypoints else None
+        self.current_pos = waypoints[0] if waypoints else None  # GCJ-02
         self.battery_reserve_percent = battery_reserve_percent
         self.start_abs_time = None
         self.pause_start_time = None
@@ -450,17 +455,15 @@ class FlightSimulator:
                     self.dist_traveled = target_dist
                     break
                 dist_accum += seg_dist
-        # 检查航点到达日志
         if self.current_index > self.last_logged_wp_index:
             for wp_idx in range(self.last_logged_wp_index + 1, self.current_index + 1):
                 if self.logger:
                     self.logger.add_log(f"FCU→OBC→GCS: WP_REACHED #{wp_idx}", "FCU", direction="FCU->OBC->GCS")
             self.last_logged_wp_index = self.current_index
-        # 电量模拟
         progress = self.dist_traveled / self.total_distance if self.total_distance > 0 else 1
         self.battery_percent = max(0, 100 - progress * (100 - self.battery_reserve_percent))
 
-# ==================== 心跳模拟器 ====================
+# ==================== 心跳模拟器（不变） ====================
 class DroneHeartbeatSimulator:
     def __init__(self, timeout_seconds=3, logger=None):
         self.timeout_seconds = timeout_seconds
@@ -967,11 +970,19 @@ elif st.session_state.page == "任务执行":
     st.metric("🔋 电量模拟", f"{sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     
-    # 准备地图数据
-    route_lons = [p[0] for p in st.session_state.planned_waypoints]
-    route_lats = [p[1] for p in st.session_state.planned_waypoints]
+    # ---------- 关键修改：将所有 GCJ-02 坐标转换为 WGS-84 ----------
+    # 转换 planned_waypoints 用于地图显示
+    display_waypoints = []
+    for p in st.session_state.planned_waypoints:
+        lon_w, lat_w = gcj02_to_wgs84(p[0], p[1])
+        display_waypoints.append((lon_w, lat_w))
+    
+    # 航线路径 (WGS-84)
+    route_lons = [p[0] for p in display_waypoints]
+    route_lats = [p[1] for p in display_waypoints]
     route_path = [[lon, lat] for lon, lat in zip(route_lons, route_lats)]
     
+    # 已飞路径 (WGS-84)
     flown_points = []
     if sim.dist_traveled > 0:
         dist_acc = 0.0
@@ -979,25 +990,38 @@ elif st.session_state.page == "任务执行":
         for i in range(len(waypts)-1):
             seg_dist = haversine(waypts[i][0], waypts[i][1], waypts[i+1][0], waypts[i+1][1]) * 1000
             if dist_acc + seg_dist < sim.dist_traveled - 1e-6:
-                flown_points.append(waypts[i+1])
+                # 完全飞过的点，转换为 WGS-84 后加入
+                lon_w, lat_w = gcj02_to_wgs84(waypts[i+1][0], waypts[i+1][1])
+                flown_points.append((lon_w, lat_w))
                 dist_acc += seg_dist
             else:
                 t = (sim.dist_traveled - dist_acc) / seg_dist if seg_dist > 0 else 0
-                lon = waypts[i][0] + t * (waypts[i+1][0] - waypts[i][0])
-                lat = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
-                flown_points.append((lon, lat))
+                lon_gcj = waypts[i][0] + t * (waypts[i+1][0] - waypts[i][0])
+                lat_gcj = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
+                lon_w, lat_w = gcj02_to_wgs84(lon_gcj, lat_gcj)
+                flown_points.append((lon_w, lat_w))
                 break
     flown_path = [[lon, lat] for lon, lat in flown_points]
     
+    # 障碍物多边形 (WGS-84)
     obstacle_polygons = []
     for obs in st.session_state.obstacles:
         if obs.get('height', 50) >= st.session_state.flight_altitude:
-            coords = obs['coordinates']
-            polygon_coords = [[lon, lat] for lon, lat in coords]
-            obstacle_polygons.append(polygon_coords)
+            coords_wgs = []
+            for lon, lat in obs['coordinates']:
+                lon_w, lat_w = gcj02_to_wgs84(lon, lat)
+                coords_wgs.append([lon_w, lat_w])
+            obstacle_polygons.append(coords_wgs)
     
-    current_lon, current_lat = sim.current_pos
+    # 当前无人机位置 (WGS-84)
+    current_lon_gcj, current_lat_gcj = sim.current_pos
+    current_lon_wgs, current_lat_wgs = gcj02_to_wgs84(current_lon_gcj, current_lat_gcj)
     
+    # 起点/终点标记 (WGS-84)
+    start_lon_wgs, start_lat_wgs = display_waypoints[0]
+    end_lon_wgs, end_lat_wgs = display_waypoints[-1]
+    
+    # 构建 PyDeck 图层
     layers = []
     # 航线
     layers.append(pdk.Layer(
@@ -1036,7 +1060,7 @@ elif st.session_state.page == "任务执行":
     # 无人机位置
     layers.append(pdk.Layer(
         'ScatterplotLayer',
-        data=[{'lon': current_lon, 'lat': current_lat}],
+        data=[{'lon': current_lon_wgs, 'lat': current_lat_wgs}],
         get_position='[lon, lat]',
         get_color='[255, 0, 0]',
         get_radius=15,
@@ -1044,8 +1068,8 @@ elif st.session_state.page == "任务执行":
     ))
     # 起点终点
     markers = pd.DataFrame([
-        {'lon': st.session_state.planned_waypoints[0][0], 'lat': st.session_state.planned_waypoints[0][1], 'type': 'start', 'color': [0, 255, 0]},
-        {'lon': st.session_state.planned_waypoints[-1][0], 'lat': st.session_state.planned_waypoints[-1][1], 'type': 'end', 'color': [255, 0, 0]}
+        {'lon': start_lon_wgs, 'lat': start_lat_wgs, 'type': 'start', 'color': [0, 255, 0]},
+        {'lon': end_lon_wgs, 'lat': end_lat_wgs, 'type': 'end', 'color': [255, 0, 0]}
     ])
     layers.append(pdk.Layer(
         'ScatterplotLayer',
@@ -1056,7 +1080,7 @@ elif st.session_state.page == "任务执行":
         pickable=True,
     ))
     
-    view_state = pdk.ViewState(latitude=current_lat, longitude=current_lon, zoom=17, pitch=0, bearing=0)
+    view_state = pdk.ViewState(latitude=current_lat_wgs, longitude=current_lon_wgs, zoom=17, pitch=0, bearing=0)
     map_style = 'mapbox://styles/mapbox/satellite-streets-v11' if st.session_state.map_style == "卫星影像" else 'light'
     
     r = pdk.Deck(layers=layers, initial_view_state=view_state, map_style=map_style, tooltip={"text": "{type}"})
@@ -1074,7 +1098,6 @@ elif st.session_state.page == "任务执行":
         st.markdown(link_topology_html(delay, loss), unsafe_allow_html=True)
         
         st.subheader("📜 通信日志")
-        # 方向选择控件
         log_direction = st.radio(
             "业务流程方向",
             ["全部", "GCS→OBC→FCU", "FCU→OBC→GCS", "系统消息"],
@@ -1099,7 +1122,7 @@ elif st.session_state.page == "任务执行":
         time.sleep(st.session_state.map_refresh_interval_ms / 1000.0)
         st.rerun()
 
-# ==================== 页面3：航线规划 ====================
+# ==================== 页面3：航线规划（使用 GCJ-02，不变） ====================
 elif st.session_state.page == "航线规划":
     import folium
     from folium.plugins import Draw
@@ -1454,6 +1477,9 @@ elif st.session_state.page == "坐标系设置":
     if st.button("WGS-84 → GCJ-02"):
         gcj_lon, gcj_lat = wgs84_to_gcj02(test_lon, test_lat)
         st.write(f"GCJ-02: {gcj_lat:.6f}, {gcj_lon:.6f}")
+    if st.button("GCJ-02 → WGS-84"):
+        wgs_lon, wgs_lat = gcj02_to_wgs84(test_lon, test_lat)
+        st.write(f"WGS-84: {wgs_lat:.6f}, {wgs_lon:.6f}")
 
 # ==================== 自动刷新（心跳） ====================
 if st.session_state.running:
