@@ -559,6 +559,130 @@ class DroneHeartbeatSimulator:
             'received_count': len(self.heartbeat_history)
         }
 
+# ==================== MAVLink 数据流模拟器 ====================
+class MavLinkSimulator:
+    """模拟生成 MAVLink 消息流，用于演示报文显示"""
+    # 常见 MAVLink 消息定义（id, name, fields）
+    MESSAGE_TEMPLATES = {
+        0:   {'name': 'HEARTBEAT', 'fields': ['type', 'autopilot', 'base_mode', 'custom_mode', 'system_status', 'mavlink_version']},
+        30:  {'name': 'ATTITUDE', 'fields': ['roll', 'pitch', 'yaw', 'rollspeed', 'pitchspeed', 'yawspeed']},
+        24:  {'name': 'GPS_RAW_INT', 'fields': ['lat', 'lon', 'alt', 'eph', 'epv', 'vel', 'cog', 'satellites_visible']},
+        1:   {'name': 'SYS_STATUS', 'fields': ['voltage_battery', 'current_battery', 'battery_remaining', 'drop_rate_comm', 'errors_comm']},
+        32:  {'name': 'LOCAL_POSITION_NED', 'fields': ['x', 'y', 'z', 'vx', 'vy', 'vz']},
+        33:  {'name': 'GLOBAL_POSITION_INT', 'fields': ['lat', 'lon', 'alt', 'relative_alt', 'vx', 'vy', 'vz', 'hdg']},
+        36:  {'name': 'RC_CHANNELS', 'fields': ['chan1_raw', 'chan2_raw', 'chan3_raw', 'chan4_raw', 'chan5_raw', 'chan6_raw', 'chan7_raw', 'chan8_raw']},
+        141: {'name': 'MISSION_CURRENT', 'fields': ['seq']},
+    }
+    # 消息生成概率（权重）
+    WEIGHTS = {0: 0.3, 30: 0.15, 24: 0.1, 1: 0.1, 32: 0.1, 33: 0.1, 36: 0.05, 141: 0.1}
+
+    def __init__(self, logger=None, maxlen=100):
+        self.logger = logger
+        self.messages = deque(maxlen=maxlen)          # 存储最近的消息
+        self.sequence = 0
+        self.start_time = time.time()
+        self.total_sent = 0
+
+    def _generate_field_value(self, field_name, msg_id):
+        """根据字段名生成合理的模拟值"""
+        # 基础随机值
+        if field_name in ['type', 'autopilot', 'base_mode', 'custom_mode', 'system_status']:
+            return random.randint(0, 10)
+        elif field_name == 'mavlink_version':
+            return 3
+        elif field_name in ['roll', 'pitch', 'yaw']:
+            return random.uniform(-3.14, 3.14)
+        elif field_name in ['rollspeed', 'pitchspeed', 'yawspeed']:
+            return random.uniform(-1, 1)
+        elif field_name in ['lat', 'lon']:
+            # 模拟南京周边坐标（GCJ-02）
+            base_lat, base_lon = 32.060, 118.796
+            return base_lat + random.uniform(-0.02, 0.02) if field_name == 'lat' else base_lon + random.uniform(-0.02, 0.02)
+        elif field_name == 'alt':
+            return random.uniform(0, 100)   # 米
+        elif field_name in ['eph', 'epv']:
+            return random.uniform(0.5, 2.0)
+        elif field_name == 'vel':
+            return random.uniform(0, 30)
+        elif field_name == 'cog':
+            return random.uniform(0, 360)
+        elif field_name == 'satellites_visible':
+            return random.randint(6, 18)
+        elif field_name in ['voltage_battery', 'current_battery']:
+            return random.uniform(11.0, 12.6) if 'voltage' in field_name else random.uniform(0, 10)
+        elif field_name == 'battery_remaining':
+            return random.uniform(10, 100)
+        elif field_name in ['drop_rate_comm', 'errors_comm']:
+            return random.uniform(0, 5)
+        elif field_name in ['x', 'y', 'z']:
+            return random.uniform(-10, 10)
+        elif field_name in ['vx', 'vy', 'vz']:
+            return random.uniform(-5, 5)
+        elif field_name == 'relative_alt':
+            return random.uniform(0, 50)
+        elif field_name == 'hdg':
+            return random.uniform(0, 360)
+        elif field_name.startswith('chan'):
+            return random.randint(1000, 2000)
+        elif field_name == 'seq':
+            return random.randint(0, 255)
+        else:
+            return random.random() * 100
+
+    def generate_message(self):
+        """生成一条 MAVLink 消息"""
+        msg_id = random.choices(
+            list(self.WEIGHTS.keys()),
+            weights=list(self.WEIGHTS.values()),
+            k=1
+        )[0]
+        template = self.MESSAGE_TEMPLATES.get(msg_id)
+        if not template:
+            return None
+        fields = {}
+        for fname in template['fields']:
+            fields[fname] = self._generate_field_value(fname, msg_id)
+        # 特殊处理：GPS 消息中的 lat/lon 用 GCJ-02 坐标模拟
+        if msg_id == 24:
+            lat = fields.get('lat', 0)
+            lon = fields.get('lon', 0)
+            # 为了演示，保持原样
+        msg = {
+            'sequence': self.sequence,
+            'msg_id': msg_id,
+            'name': template['name'],
+            'fields': fields,
+            'timestamp': datetime.datetime.now(BEIJING_TZ),
+            'delay_ms': random.uniform(50, 300)   # 模拟传输延迟
+        }
+        self.messages.append(msg)
+        self.sequence += 1
+        self.total_sent += 1
+
+        # 记录到通信日志（仅记录部分关键消息，避免日志刷屏）
+        if self.logger and msg_id in [0, 30, 1]:
+            self.logger.add_log(
+                f"MAVLink {msg['name']} (ID:{msg_id}) seq:{msg['sequence']}",
+                source="FCU",
+                direction="FCU->OBC->GCS"
+            )
+        return msg
+
+    def get_recent(self, count=20):
+        """获取最近 n 条消息（倒序）"""
+        return list(self.messages)[-count:][::-1]
+
+    def get_statistics(self):
+        """统计消息数量、各类型占比"""
+        if not self.messages:
+            return {'total': 0, 'types': {}}
+        total = len(self.messages)
+        types = {}
+        for msg in self.messages:
+            name = msg['name']
+            types[name] = types.get(name, 0) + 1
+        return {'total': total, 'types': types}
+
 # ==================== 辅助函数 ====================
 def get_beijing_time_info():
     now = datetime.datetime.now(BEIJING_TZ)
@@ -746,6 +870,10 @@ if "map_refresh_interval_ms" not in st.session_state:
     st.session_state.map_refresh_interval_ms = 200
 if "comm_logger" not in st.session_state:
     st.session_state.comm_logger = CommunicationLogger(maxlen=100)
+if "mavlink_sim" not in st.session_state:
+    st.session_state.mavlink_sim = MavLinkSimulator(logger=st.session_state.comm_logger, maxlen=100)
+if "mavlink_auto_update" not in st.session_state:
+    st.session_state.mavlink_auto_update = True
 
 # 创建心跳模拟器
 if st.session_state.simulator is None:
@@ -803,8 +931,8 @@ with st.sidebar:
     refresh_rate = st.selectbox("心跳刷新频率（秒）", [1, 2, 3, 5], index=0)
     st.divider()
     st.subheader("🧭 功能页面")
-    page = st.radio("跳转", ["心跳监控", "任务执行", "航线规划", "障碍物管理", "坐标系设置"], 
-                    index=["心跳监控", "任务执行", "航线规划", "障碍物管理", "坐标系设置"].index(st.session_state.page))
+    page = st.radio("跳转", ["心跳监控", "任务执行", "航线规划", "障碍物管理", "坐标系设置", "数据流监控"], 
+                    index=["心跳监控", "任务执行", "航线规划", "障碍物管理", "坐标系设置", "数据流监控"].index(st.session_state.page))
     st.session_state.page = page
 
 # ==================== 自动心跳生成 ====================
@@ -1490,6 +1618,112 @@ elif st.session_state.page == "坐标系设置":
     if st.button("GCJ-02 → WGS-84"):
         wgs_lon, wgs_lat = gcj02_to_wgs84(test_lon, test_lat)
         st.write(f"WGS-84: {wgs_lat:.6f}, {wgs_lon:.6f}")
+
+# ==================== 页面6：数据流监控 ====================
+elif st.session_state.page == "数据流监控":
+    st.header("📡 MAVLink 数据流与报文显示")
+    st.caption("实时模拟 MAVLink 消息流，展示报文内容，区分于通信日志（历史记录）。")
+
+    # 获取 MAVLink 模拟器
+    mav_sim = st.session_state.mavlink_sim
+
+    # 控制区
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("▶ 开始生成数据流", use_container_width=True):
+            st.session_state.mavlink_auto_update = True
+    with col2:
+        if st.button("⏹ 停止生成", use_container_width=True):
+            st.session_state.mavlink_auto_update = False
+    with col3:
+        if st.button("🔄 清空消息", use_container_width=True):
+            mav_sim.messages.clear()
+            st.rerun()
+
+    # 自动生成消息（如果开启）
+    if st.session_state.mavlink_auto_update:
+        # 每秒生成 1~3 条消息
+        for _ in range(random.randint(1, 3)):
+            mav_sim.generate_message()
+        time.sleep(0.5)   # 控制更新频率
+        st.rerun()
+
+    # 统计信息
+    stats = mav_sim.get_statistics()
+    total = stats['total']
+    st.metric("总消息数", total)
+    if total > 0:
+        # 显示各类型占比
+        type_counts = stats['types']
+        df_types = pd.DataFrame(list(type_counts.items()), columns=['消息类型', '数量'])
+        df_types['占比'] = (df_types['数量'] / total * 100).round(1)
+        st.dataframe(df_types, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # 获取最近消息（倒序）
+    recent_msgs = mav_sim.get_recent(count=50)
+
+    if not recent_msgs:
+        st.info("暂无 MAVLink 消息，请点击「开始生成数据流」")
+        st.stop()
+
+    # 用 selectbox 选择要查看详情的消息
+    msg_options = []
+    for idx, msg in enumerate(recent_msgs):
+        t_str = msg['timestamp'].strftime('%H:%M:%S')
+        label = f"[{t_str}] {msg['name']} (seq:{msg['sequence']})"
+        msg_options.append(label)
+
+    selected_idx = st.selectbox(
+        "选择一条消息查看详细报文",
+        options=range(len(msg_options)),
+        format_func=lambda i: msg_options[i],
+        key="mavlink_select"
+    )
+
+    # 显示选中的消息详情
+    selected_msg = recent_msgs[selected_idx]
+    st.subheader(f"📄 报文详情 — {selected_msg['name']} (ID:{selected_msg['msg_id']})")
+    col_left, col_right = st.columns([1, 2])
+    with col_left:
+        st.write(f"**序号**：{selected_msg['sequence']}")
+        st.write(f"**时间**：{selected_msg['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+        st.write(f"**延迟**：{selected_msg['delay_ms']:.1f} ms")
+    with col_right:
+        # 字段显示为表格
+        fields = selected_msg['fields']
+        if fields:
+            df_fields = pd.DataFrame(list(fields.items()), columns=['字段名', '值'])
+            st.dataframe(df_fields, use_container_width=True, hide_index=True)
+        else:
+            st.write("（无字段）")
+
+    # 显示最近消息列表（表格）
+    st.subheader("📋 最近消息流（点击上方选择查看详情）")
+    # 构建表格数据（只显示关键列）
+    table_data = []
+    for i, msg in enumerate(recent_msgs[:20]):  # 只显示最近20条
+        table_data.append({
+            "序号": msg['sequence'],
+            "时间": msg['timestamp'].strftime('%H:%M:%S'),
+            "消息名": msg['name'],
+            "ID": msg['msg_id'],
+            "关键字段": ", ".join([f"{k}={v:.1f}" if isinstance(v, float) else f"{k}={v}" for k, v in list(msg['fields'].items())[:3]])
+        })
+    if table_data:
+        df_table = pd.DataFrame(table_data)
+        st.dataframe(df_table, use_container_width=True, hide_index=True)
+
+    # 概念说明
+    with st.expander("💡 关于 MAVLink 数据流、报文显示与通信日志的区别"):
+        st.markdown("""
+        - **MAVLink 数据流**：实时传输的原始消息序列（如本页面模拟的）。
+        - **报文显示**：将数据流中的每条消息解析并呈现为可读的字段列表（如上方的详情面板）。
+        - **通信日志**：历史记录文件（`.tlog` 等），保存整个飞行过程中的所有消息，可用于离线回放和分析。
+
+        本页面展示 **实时数据流** 和 **报文显示**，而 **通信日志** 可查看“任务执行”页面中的日志区域。
+        """)
 
 # ==================== 自动刷新（心跳） ====================
 if st.session_state.running:
